@@ -7,3 +7,6 @@ rag_meta.db
 data/pytest_tmp/
 reports/*.json
 reports/*.md
+
+# Ignore all local/project data files
+/data/
