@@ -1,0 +1,9 @@
+﻿__pycache__/
+*.pyc
+.venv/
+rag_meta.db
+.pytest_cache/
+.pytest_tmp/
+data/pytest_tmp/
+reports/*.json
+reports/*.md

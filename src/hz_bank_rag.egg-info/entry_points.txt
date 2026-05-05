@@ -1,0 +1,2 @@
+[console_scripts]
+hz-rag-seed = hz_bank_rag.examples.seed_demo:main

@@ -1,0 +1,487 @@
+﻿openapi: 3.0.3
+info:
+  title: HZ Bank RAG API
+  version: 0.7.0
+  description: Hangzhou Bank Production RAG API
+servers:
+  - url: http://127.0.0.1:8090
+
+tags:
+  - name: system
+  - name: knowledge-base
+  - name: query
+  - name: feedback
+  - name: evaluation
+  - name: collections
+  - name: demo
+
+paths:
+  /health:
+    get:
+      tags: [system]
+      summary: Health check
+      responses:
+        '200': { description: OK }
+
+  /knowledge-bases/{kb_id}/documents:
+    post:
+      tags: [knowledge-base]
+      summary: Ingest one document
+      parameters:
+        - in: path
+          name: kb_id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IngestRequest' }
+      responses:
+        '200': { description: OK }
+
+  /knowledge-bases/{kb_id}/documents/bulk:
+    post:
+      tags: [knowledge-base]
+      summary: Ingest documents in batch
+      parameters:
+        - in: path
+          name: kb_id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BulkIngestRequest' }
+      responses:
+        '200': { description: OK }
+
+  /knowledge-bases/documents:
+    get:
+      tags: [knowledge-base]
+      summary: List documents
+      parameters:
+        - in: query
+          name: kb_id
+          required: false
+          schema: { type: string }
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, default: 20, minimum: 1, maximum: 200 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/DocumentRecord' }
+
+  /knowledge-bases/{kb_id}/documents/{doc_id}:
+    delete:
+      tags: [knowledge-base]
+      summary: Delete one document
+      parameters:
+        - in: path
+          name: kb_id
+          required: true
+          schema: { type: string }
+        - in: path
+          name: doc_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+
+  /knowledge-bases/{kb_id}:
+    delete:
+      tags: [knowledge-base]
+      summary: Delete one knowledge base
+      parameters:
+        - in: path
+          name: kb_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+
+  /knowledge-bases/documents/{doc_id}/asset:
+    get:
+      tags: [knowledge-base]
+      summary: Download or display original document asset by doc_id
+      parameters:
+        - in: path
+          name: doc_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Binary file stream
+          content:
+            application/octet-stream: {}
+
+  /query:
+    post:
+      tags: [query]
+      summary: Ask query
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/QueryRequest' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QueryResponse' }
+
+  /query/stream:
+    post:
+      tags: [query]
+      summary: Ask query in SSE stream
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/QueryRequest' }
+      responses:
+        '200':
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+  /conversations/{session_id}:
+    get:
+      tags: [query]
+      summary: Get conversation history for a session
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: kb_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, default: 40, minimum: 1, maximum: 200 }
+      responses:
+        '200': { description: OK }
+
+  /bad-cases:
+    post:
+      tags: [feedback]
+      summary: Submit bad case
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BadCaseRequest' }
+      responses:
+        '200': { description: OK }
+    get:
+      tags: [feedback]
+      summary: List bad cases
+      parameters:
+        - in: query
+          name: kb_id
+          required: false
+          schema: { type: string }
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, default: 50, minimum: 1, maximum: 500 }
+      responses:
+        '200': { description: OK }
+
+  /bad-cases/snapshot:
+    post:
+      tags: [feedback]
+      summary: Build retrieval snapshot for bad-case submission
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BadCaseSnapshotRequest' }
+      responses:
+        '200': { description: OK }
+
+  /bad-cases/ragas-dataset:
+    get:
+      tags: [feedback, evaluation]
+      summary: Build ragas dataset rows from bad-case records
+      parameters:
+        - in: query
+          name: kb_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, default: 50, minimum: 1, maximum: 200 }
+        - in: query
+          name: fill_answer
+          required: false
+          schema: { type: boolean, default: true }
+      responses:
+        '200': { description: OK }
+
+  /evaluate/ragas:
+    post:
+      tags: [evaluation]
+      summary: Evaluate ragas metrics (lightweight LLM-judge pipeline)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EvalRequest' }
+      responses:
+        '200': { description: OK }
+
+  /evaluate/ragas/official:
+    post:
+      tags: [evaluation]
+      summary: Evaluate ragas metrics with official ragas pipeline
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EvalRequest' }
+      responses:
+        '200': { description: OK }
+
+  /evaluate/ragas/ab:
+    post:
+      tags: [evaluation]
+      summary: Run A/B comparison (lightweight vs official ragas)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EvalRequest' }
+      responses:
+        '200': { description: OK }
+
+  /evaluate/ragas/dataset/build:
+    post:
+      tags: [evaluation]
+      summary: Build ragas dataset from questions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RagasBuildRequest' }
+      responses:
+        '200': { description: OK }
+
+  /collections/policy:
+    get:
+      tags: [collections]
+      summary: Show Milvus collection naming policy
+      responses:
+        '200': { description: OK }
+
+  /collections/managed:
+    get:
+      tags: [collections]
+      summary: List managed Milvus collections
+      responses:
+        '200': { description: OK }
+
+  /collections/cleanup:
+    post:
+      tags: [collections]
+      summary: Cleanup stale Milvus collections
+      parameters:
+        - in: query
+          name: dry_run
+          required: false
+          schema: { type: boolean, default: true }
+      responses:
+        '200': { description: OK }
+
+  /demo/seed:
+    post:
+      tags: [demo]
+      summary: Seed demo data
+      responses:
+        '200': { description: OK }
+
+components:
+  schemas:
+    RetrievalScope:
+      type: string
+      enum: [active_only, include_history]
+      default: active_only
+
+    IngestRequest:
+      type: object
+      required: [file_path]
+      properties:
+        file_path: { type: string }
+        parser_type: { type: string, default: auto }
+        chunk_strategy: { type: string, default: recursive }
+
+    BulkIngestRequest:
+      type: object
+      required: [file_paths]
+      properties:
+        file_paths:
+          type: array
+          items: { type: string }
+        chunk_strategy: { type: string, default: recursive }
+
+    QueryRequest:
+      type: object
+      required: [kb_id, query]
+      properties:
+        kb_id: { type: string }
+        query: { type: string }
+        top_k: { type: integer, default: 5 }
+        candidate_multiplier: { type: integer, default: 4 }
+        fast_mode: { type: boolean, default: true }
+        session_id: { type: string, default: '' }
+        use_memory: { type: boolean, default: true }
+        refresh_cache: { type: boolean, default: false }
+        retrieval_scope: { $ref: '#/components/schemas/RetrievalScope' }
+        freshness_weight: { type: number, format: float, default: 0.08 }
+        dedup_by_family: { type: boolean, default: true }
+
+    BadCaseRequest:
+      type: object
+      required: [kb_id, query, feedback]
+      properties:
+        kb_id: { type: string }
+        query: { type: string }
+        rewritten_query: { type: string }
+        feedback: { type: string }
+        retrieval_snapshot: { type: object }
+        auto_capture_snapshot: { type: boolean, default: true }
+        top_k: { type: integer, default: 5 }
+        candidate_multiplier: { type: integer, default: 4 }
+        fast_mode: { type: boolean, default: true }
+        category: { type: string, default: retrieval }
+        severity: { type: string, default: medium }
+        status: { type: string, default: open }
+        expected_answer: { type: string, default: '' }
+        retrieval_scope: { $ref: '#/components/schemas/RetrievalScope' }
+        freshness_weight: { type: number, format: float, default: 0.08 }
+        dedup_by_family: { type: boolean, default: true }
+
+    BadCaseSnapshotRequest:
+      type: object
+      required: [kb_id, query]
+      properties:
+        kb_id: { type: string }
+        query: { type: string }
+        rewritten_query: { type: string }
+        top_k: { type: integer, default: 5 }
+        candidate_multiplier: { type: integer, default: 4 }
+        fast_mode: { type: boolean, default: true }
+        retrieval_scope: { $ref: '#/components/schemas/RetrievalScope' }
+        freshness_weight: { type: number, format: float, default: 0.08 }
+        dedup_by_family: { type: boolean, default: true }
+
+    EvalRequest:
+      type: object
+      required: [dataset]
+      properties:
+        dataset:
+          type: array
+          items:
+            type: object
+            required: [question, answer, contexts, ground_truth]
+            properties:
+              question: { type: string }
+              answer: { type: string }
+              contexts:
+                type: array
+                items: { type: string }
+              ground_truth: { type: string }
+
+    RagasBuildSample:
+      type: object
+      required: [question, ground_truth]
+      properties:
+        question: { type: string }
+        ground_truth: { type: string }
+
+    RagasBuildRequest:
+      type: object
+      required: [kb_id, samples]
+      properties:
+        kb_id: { type: string }
+        samples:
+          type: array
+          items: { $ref: '#/components/schemas/RagasBuildSample' }
+        top_k: { type: integer, default: 5 }
+        candidate_multiplier: { type: integer, default: 4 }
+        fast_mode: { type: boolean, default: true }
+
+    DocumentRecord:
+      type: object
+      properties:
+        doc_id: { type: string }
+        kb_id: { type: string }
+        file_path: { type: string }
+        file_hash: { type: string, description: SHA256 hash (legacy alias kept) }
+        content_hash: { type: string, description: SHA256 hash for exact-duplicate idempotency }
+        near_hash: { type: string, description: SimHash for near-duplicate detection }
+        file_size: { type: integer }
+        parser_type: { type: string }
+        doc_family_id: { type: string, description: Family id for versioned documents }
+        version_no: { type: integer, minimum: 1 }
+        effective_at: { type: string, description: Effective timestamp (ISO-like text) }
+        is_active: { type: boolean, description: Active version flag }
+        keywords:
+          type: array
+          items: { type: string }
+        created_at: { type: string }
+
+    Citation:
+      type: object
+      properties:
+        chunk_id: { type: string }
+        doc_id: { type: string }
+        score: { type: number, format: float }
+        bm25_score: { type: number, format: float }
+        vector_score: { type: number, format: float }
+        rrf_score: { type: number, format: float }
+        rerank_score: { type: number, format: float }
+        source_file_path: { type: string }
+        source_file_name: { type: string }
+        source_type: { type: string }
+        display_type: { type: string, enum: [text, image] }
+        asset_url: { type: string }
+        preview_text: { type: string }
+
+    QueryResponse:
+      type: object
+      properties:
+        kb_id: { type: string }
+        query: { type: string }
+        rewritten_query: { type: string }
+        answer: { type: string }
+        fast_mode: { type: boolean }
+        retrieval_scope: { $ref: '#/components/schemas/RetrievalScope' }
+        freshness_weight: { type: number, format: float }
+        dedup_by_family: { type: boolean }
+        session_id: { type: string }
+        memory:
+          type: object
+          additionalProperties: true
+        citations:
+          type: array
+          items: { $ref: '#/components/schemas/Citation' }
+        cache_hit: { type: boolean }
+        latency_ms: { type: integer }
+        cache_stats:
+          type: object
+          additionalProperties: true

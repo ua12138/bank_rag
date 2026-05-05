@@ -1,0 +1,168 @@
+Metadata-Version: 2.4
+Name: hz-bank-rag
+Version: 0.2.0
+Summary: Hangzhou Bank production operation center intelligent QA system based on modular RAG.
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: fastapi>=0.115.0
+Requires-Dist: uvicorn[standard]>=0.30.0
+Requires-Dist: pydantic>=2.8.0
+Requires-Dist: pydantic-settings>=2.4.0
+Requires-Dist: numpy>=1.26.0
+Requires-Dist: rank-bm25>=0.2.2
+Requires-Dist: jieba>=0.42.1
+Requires-Dist: pymilvus>=2.4.5
+Requires-Dist: langchain-text-splitters>=0.3.0
+Requires-Dist: pandas>=2.2.2
+Requires-Dist: datasets>=2.21.0
+Requires-Dist: pypdf>=5.0.0
+Requires-Dist: python-docx>=1.1.2
+Requires-Dist: python-pptx>=1.0.2
+Requires-Dist: Pillow>=10.4.0
+Requires-Dist: pytesseract>=0.3.10
+Requires-Dist: rapidocr-onnxruntime>=1.3.24
+Requires-Dist: pywin32>=306; platform_system == "Windows"
+Requires-Dist: httpx>=0.27.0
+Provides-Extra: ml
+Requires-Dist: sentence-transformers>=3.0.1; extra == "ml"
+Requires-Dist: transformers>=4.44.0; extra == "ml"
+Requires-Dist: torch>=2.3.0; extra == "ml"
+Provides-Extra: ragas
+Requires-Dist: ragas>=0.1.14; extra == "ragas"
+Provides-Extra: dev
+Requires-Dist: pytest>=8.3.0; extra == "dev"
+
+﻿# HZ Bank RAG 快速操作手册
+
+本手册只回答一件事：如何在最短时间把系统跑起来并验证核心能力。
+
+## 0. 你将看到的数据存储位置
+
+- 文档原始文件：默认在 `data/demo_kb/`（可替换为共享目录/OSS/S3 同步目录）。
+- 元数据（知识库、文档、chunk、bad-case）：SQLite 文件 `rag_meta.db`。
+- 向量数据：
+  - 开启 Milvus 时写入远端 Milvus（默认 `47.111.101.201:19530`）。
+  - 未开启时使用内存向量库（重启丢失）。
+- 解析后的文本：存储在 `rag_meta.db` 的 `chunks.text` 字段。
+- 图片识别后的文本：同样写入 `chunks.text`，并在 `chunks.metadata_json` 中保留来源信息（文件名/后缀/source_type）。
+
+## 1. 启动服务
+
+```powershell
+cd D:\code_warehouse\codex_learn\hz_bank_rag
+pip install -e .
+
+$env:HZ_RAG_SILICONFLOW_BASE_URL="https://api.siliconflow.cn/v1"
+$env:HZ_RAG_SILICONFLOW_API_KEY="<你的 key>"
+$env:HZ_RAG_USE_MILVUS="true"
+$env:HZ_RAG_MILVUS_URI="http://47.111.101.201:19530"
+
+uvicorn hz_bank_rag.api.main:app --reload --port 8090
+```
+
+打开 Swagger：`http://127.0.0.1:8090/docs`
+
+## 2. 入库演示数据
+
+接口：`POST /demo/seed`
+
+预期：
+- `count >= 1`
+- `ingested_files` 包含你放在 `data/demo_kb/` 下的文件（txt/md/log/pdf/docx/pptx/jpg/png...）
+
+如果 `count=0`：
+- 检查 `data/demo_kb/` 是否有文件。
+- 检查 `GET /health` 中 `siliconflow_key_configured` 是否为 `true`。
+
+## 3. 普通问答与流式问答
+
+### 3.1 普通问答
+接口：`POST /query`
+```json
+{
+  "kb_id": "hz-bank-demo",
+  "query": "数据库连接池告警怎么处理？",
+  "fast_mode": true
+}
+```
+
+### 3.2 流式问答
+接口：`POST /query/stream`
+- SSE 事件顺序：`meta -> token -> done`
+
+## 4. 图片检索结果怎么展示
+
+`/query` 返回的 `citations` 中已经包含：
+- `display_type`：`image` 或 `text`
+- `asset_url`：例如 `/knowledge-bases/documents/{doc_id}/asset`
+- `source_file_name`
+- `preview_text`（OCR/图转文结果摘要）
+
+前端展示建议：
+1. `display_type=image`：用 `asset_url` 渲染图片缩略图，旁边显示 `preview_text`。
+2. `display_type=text`：按普通文本引用卡片展示。
+
+## 5. 图片文字识别链路（已实现）
+
+系统会按顺序尝试：
+1. RapidOCR（本地中文 OCR）
+2. pytesseract（本地 OCR 兜底）
+3. Vision 模型表格优先识别（尽量输出 Markdown 表）
+4. Vision 模型通用 OCR
+5. CLIP 向量摘要（用于多模态语义，不替代 OCR）
+
+注意：
+- 仅靠 CLIP 不能稳定读取表格文字，表格识别主要依赖 OCR/VLM。
+
+## 6. RAGAS 数据集如何生成
+
+你问的关键点：是否必须“入库前预处理”？
+- 不需要。正确顺序是：**先入库，再构建评估集**。
+
+推荐流程：
+1. 准备人工问题和标准答案（`question + ground_truth`）。
+2. 调用 `POST /evaluate/ragas/dataset/build`，系统会自动跑检索+生成，返回每条：
+   - `question`
+   - `answer`
+   - `contexts`
+   - `ground_truth`
+3. 把返回结果直接提交到 `POST /evaluate/ragas`。
+
+## 7. bad-case 如何填写与回流
+
+### 7.1 为什么要有 `retrieval_snapshot`
+它用于“复现现场”。只看用户一句“答错了”无法定位是：
+- 查询重写错
+- 检索没召回
+- 重排把好结果压下去
+- 还是生成幻觉
+
+### 7.2 两种填写方式
+1. 自动方式（推荐）
+- 调 `POST /bad-cases` 时设置 `auto_capture_snapshot=true`，无需手填 `retrieval_snapshot`。
+
+2. 手动方式
+- 先调用 `POST /bad-cases/snapshot` 拿到快照模板
+- 再把该快照写入 `POST /bad-cases`
+
+### 7.3 回流优化闭环
+1. 收集 bad-case（`GET /bad-cases`）
+2. 按原因分类（重写/召回/重排/生成）
+3. 调整参数或提示词
+4. 重放同一批问题
+5. 用 ragas 指标 + bad-case 命中率对比优化效果
+
+## 8. 关键接口速查
+
+- `POST /demo/seed`：批量导入 demo 目录
+- `POST /query`：普通问答
+- `POST /query/stream`：流式问答
+- `GET /knowledge-bases/documents?kb_id=&limit=20`：文档列表
+- `GET /knowledge-bases/documents/{doc_id}/asset`：获取图片/文件原件
+- `POST /bad-cases`：提交 bad-case
+- `POST /bad-cases/snapshot`：生成 retrieval_snapshot
+- `GET /bad-cases`：查看 bad-case 列表
+- `POST /evaluate/ragas/dataset/build`：构建 ragas 数据集
+- `POST /evaluate/ragas`：执行 ragas 评估
+
+更多技术细节见 `spec/DEV_SPEC.md`，测试流程见 `spec/ACCEPTANCE.md`。
