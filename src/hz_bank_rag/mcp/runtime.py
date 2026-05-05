@@ -1,4 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
+"""MCP 运行时装配：构建 mcp.main 需要的依赖对象。"""
 
 from dataclasses import dataclass
 
@@ -16,6 +18,8 @@ from hz_bank_rag.storage.vector_store import InMemoryVectorStore, MilvusVectorSt
 
 @dataclass
 class Runtime:
+    """MCP 服务运行时对象集合。"""
+
     meta: MetadataStore
     repo: RAGRepository
     qa: QAService
@@ -24,6 +28,7 @@ class Runtime:
 
 
 def build_runtime() -> Runtime:
+    """按统一方式组装运行时依赖。"""
     meta = MetadataStore(settings.sqlite_path)
     bm25 = BM25Store()
     vector_store = (
@@ -38,7 +43,6 @@ def build_runtime() -> Runtime:
         if settings.use_milvus
         else InMemoryVectorStore(settings.vector_dim)
     )
-
     repo = RAGRepository(metadata=meta, vector_store=vector_store, bm25=bm25)
     retriever = HybridRetriever(bm25_store=bm25, vector_store=vector_store)
     qa = QAService(
@@ -49,5 +53,4 @@ def build_runtime() -> Runtime:
         meta=meta,
     )
     ragas = RagasRunner()
-
     return Runtime(meta=meta, repo=repo, qa=qa, ragas=ragas, vector_store=vector_store)

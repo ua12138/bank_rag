@@ -5,6 +5,8 @@ import tempfile
 from functools import lru_cache
 from typing import Final
 
+# 多模态解析模块：图片 OCR（本地/视觉模型）+ 可选 CLIP 特征摘要。
+
 from hz_bank_rag.core.config import settings
 from hz_bank_rag.core.siliconflow_client import SiliconFlowClient
 
@@ -33,7 +35,7 @@ OCR_LANG: Final[str] = "chi_sim+eng"
 
 
 def image_to_text(image_path: str) -> str:
-    """Extract text from image by multi-stage OCR pipeline."""
+    """多阶段 OCR：尽量把图片里的可读文本提取完整。"""
 
     path = pathlib.Path(image_path)
     blocks: list[str] = []

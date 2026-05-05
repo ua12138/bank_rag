@@ -21,7 +21,7 @@ class DuplicateDocumentError(RuntimeError):
 
 
 class RAGRepository:
-    """RAG repository orchestration."""
+    """RAG 仓储层：负责文档入库、分块、索引维护、版本管理。"""
 
     def __init__(self, metadata: MetadataStore, vector_store: BaseVectorStore, bm25: BM25Store) -> None:
         self.metadata = metadata
@@ -31,10 +31,13 @@ class RAGRepository:
         self.bootstrap_indexes()
 
     def bootstrap_indexes(self) -> None:
+        # 服务启动时重建 BM25，保证 SQLite 中已有数据可被关键词检索到。
         for kb_id in self.metadata.list_kb_ids():
             self._rebuild_bm25(kb_id)
 
     def ingest_document(self, kb_id: str, file_path: str, parser_type: str = "auto", chunk_strategy: str | None = None) -> dict:
+        # 入库主流程：
+        # 文件校验 -> 去重 -> 解析清洗 -> 分块 -> 写入 metadata -> 写入向量库 -> 重建 BM25
         path = pathlib.Path(file_path)
         if not path.exists():
             raise FileNotFoundError(f"file not found: {file_path}")
@@ -47,6 +50,7 @@ class RAGRepository:
 
         duplicate_hash = self.metadata.get_document_by_kb_and_content_hash(kb_id=kb_id, content_hash=content_hash)
         if duplicate_hash is not None:
+            # 精确重复：同 content_hash，直接返回旧文档信息（幂等行为）。
             return {
                 "kb_id": kb_id,
                 "doc_id": duplicate_hash["doc_id"],
@@ -66,6 +70,7 @@ class RAGRepository:
         near_hash = self._simhash_hex(cleaned_text)
         near_dup = self._detect_near_duplicate(kb_id=kb_id, near_hash=near_hash)
         if near_dup is not None and settings.near_duplicate_reject:
+            # 近重复策略可配置：开启时直接拒绝，避免知识库被近似内容污染。
             raise DuplicateDocumentError(
                 "near duplicate rejected: "
                 f"current={resolved_path}, existing_doc_id={near_dup['doc_id']}, existing_file={near_dup['file_path']}"
@@ -76,6 +81,7 @@ class RAGRepository:
         chunk_keywords = extract_chunk_keywords(chunks)
 
         version_no = self.metadata.get_family_max_version(kb_id=kb_id, doc_family_id=doc_family_id) + 1
+        # 同一文档家族只保留一个“当前生效版本”。
         self.metadata.deactivate_family_documents(kb_id=kb_id, doc_family_id=doc_family_id)
 
         doc_id = str(uuid.uuid4())
@@ -120,7 +126,7 @@ class RAGRepository:
                         "source_type": source_type,
                         "doc_family_id": doc_family_id,
                         "version_no": version_no,
-                        "effective_at": effective_at,
+                        "effective_at": effective_at,  # 供“新鲜度排序”使用
                         "is_active": True,
                         "doc_keywords": doc_keywords,
                         "chunk_keywords": chunk_keywords[index] if index < len(chunk_keywords) else [],
@@ -132,6 +138,7 @@ class RAGRepository:
             )
 
         self.vector_store.upsert(kb_id=kb_id, chunk_ids=chunk_ids, texts=chunks, doc_ids=doc_ids)
+        # BM25 当前实现按知识库整体重建，保证与最新 chunk 集合一致。
         self._rebuild_bm25(kb_id)
         return {
             "kb_id": kb_id,
@@ -153,6 +160,7 @@ class RAGRepository:
         }
 
     def bulk_ingest(self, kb_id: str, file_paths: list[str], chunk_strategy: str | None = None) -> dict:
+        # 批量入库：逐个调用单文档入库，并汇总成功/跳过原因。
         results = []
         skipped_duplicates = []
         ingested_count = 0
@@ -181,6 +189,7 @@ class RAGRepository:
         }
 
     def delete_document(self, kb_id: str, doc_id: str) -> dict:
+        # 删除文档后，若该文档属于某个家族，会尝试“回滚激活”该家族最新历史版本。
         doc = self.metadata.get_document(doc_id)
         chunk_ids = self.metadata.get_doc_chunk_ids(doc_id)
         self.vector_store.delete_chunks(chunk_ids)
@@ -200,6 +209,7 @@ class RAGRepository:
         }
 
     def delete_kb(self, kb_id: str) -> dict:
+        # 整库删除：向量库、metadata、BM25 三处都要清理。
         chunk_rows = self.metadata.get_kb_chunks(kb_id)
         chunk_ids = [row["chunk_id"] for row in chunk_rows]
         self.vector_store.delete_kb(kb_id)
@@ -222,6 +232,7 @@ class RAGRepository:
         return self.metadata.get_document(doc_id)
 
     def _rebuild_bm25(self, kb_id: str) -> None:
+        # include_history: 历史版本也建索引，便于“历史追溯模式”检索。
         chunk_map = self.get_kb_chunk_map(kb_id=kb_id, retrieval_scope="include_history")
         self.bm25.rebuild(kb_id=kb_id, chunk_map={chunk_id: row["text"] for chunk_id, row in chunk_map.items()})
 
@@ -238,6 +249,7 @@ class RAGRepository:
 
     @staticmethod
     def _doc_family_id(path: pathlib.Path) -> str:
+        # 根据文件名归一化出“文档家族 ID”，用于多版本管理。
         stem = path.stem.lower().strip()
         stem = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "-" for ch in stem)
         while "--" in stem:
@@ -250,6 +262,7 @@ class RAGRepository:
 
     @staticmethod
     def _simhash_hex(text: str, bits: int = 64) -> str:
+        # 文本指纹：用于近重复检测（汉明距离越小，内容越相似）。
         if not text.strip():
             return "0" * (bits // 4)
         vector = [0] * bits
@@ -264,6 +277,7 @@ class RAGRepository:
         return f"{fingerprint:0{bits // 4}x}"
 
     def _detect_near_duplicate(self, kb_id: str, near_hash: str) -> dict | None:
+        # 在已有文档中查找“近重复候选”，命中即返回最先发现的一条。
         if not near_hash:
             return None
         candidates = self.metadata.list_document_signatures(kb_id=kb_id, limit=400)

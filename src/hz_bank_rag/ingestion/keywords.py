@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""关键词抽取模块：用于文档/分块的标签增强。"""
+
 import json
 import re
 from collections import Counter
@@ -26,6 +28,7 @@ RULE_KEYWORDS = [
 
 
 def _extract_rule_keywords(text: str) -> list[str]:
+    """规则抽取：模式匹配 + 高频分词。"""
     hits: list[str] = []
     lowered = text.lower()
 
@@ -38,7 +41,7 @@ def _extract_rule_keywords(text: str) -> list[str]:
         if token in text and token not in hits:
             hits.append(token)
 
-    # 兜底提取高频中文词，增强没有显式告警码的运维文本覆盖率。
+    # 兜底提取高频中文词，增强没有显式告警码时的覆盖率。
     words = [w.strip() for w in jieba.cut(lowered) if len(w.strip()) >= 2]
     for word, _ in Counter(words).most_common(20):
         if re.fullmatch(r"[\u4e00-\u9fff0-9a-zA-Z_\-]+", word) and word not in hits:
@@ -48,6 +51,7 @@ def _extract_rule_keywords(text: str) -> list[str]:
 
 
 def _extract_model_keywords(text: str) -> list[str]:
+    """模型抽取：可选能力，关闭时直接返回空。"""
     if not settings.keyword_model_enabled:
         return []
 
@@ -83,6 +87,7 @@ def _extract_model_keywords(text: str) -> list[str]:
 
 
 def extract_keywords(text: str) -> list[str]:
+    """总入口：合并规则关键词与模型关键词并去重。"""
     rule_terms = _extract_rule_keywords(text)
     model_terms = _extract_model_keywords(text)
     merged: list[str] = []
@@ -93,4 +98,5 @@ def extract_keywords(text: str) -> list[str]:
 
 
 def extract_chunk_keywords(chunks: list[str]) -> list[list[str]]:
+    """对每个分块分别抽取关键词。"""
     return [extract_keywords(chunk) for chunk in chunks]

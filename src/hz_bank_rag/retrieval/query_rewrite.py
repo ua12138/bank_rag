@@ -1,17 +1,25 @@
 from __future__ import annotations
 
+"""查询改写模块：把口语问题改写成更适合检索的查询语句。"""
+
 from hz_bank_rag.core.config import settings
 from hz_bank_rag.core.siliconflow_client import SiliconFlowClient, SiliconFlowError
 
 
 class QueryRewriter:
-    """查询改写器：把口语化问题改写为更适合检索的查询。"""
+    """查询改写器。
+
+    输入: 用户原始问题
+    输出: 更结构化、更可检索的查询
+    失败场景: 模型调用失败时回退到原问题
+    """
 
     def __init__(self, model: str | None = None) -> None:
         self.client = SiliconFlowClient()
         self.model = model or settings.siliconflow_chat_model
 
     def rewrite(self, query: str) -> str:
+        """执行改写。"""
         normalized = query.strip()
         if not normalized:
             return normalized

@@ -17,7 +17,7 @@ from hz_bank_rag.storage.rag_repository import RAGRepository
 
 
 class QAService:
-    """QA orchestration service."""
+    """问答编排服务：把“检索 -> 生成 -> 记忆 -> 缓存”串成一个对外能力。"""
 
     def __init__(
         self,
@@ -53,6 +53,10 @@ class QAService:
         freshness_weight: float | None = None,
         dedup_by_family: bool | None = None,
     ) -> dict:
+        # 主流程（同步版）：
+        # 1) 查询改写 2) 命中缓存则直接返回
+        # 3) 检索命中文档块 4) 组装上下文并调用大模型生成答案
+        # 5) 保存会话记忆 6) 写入缓存
         start = time.perf_counter()
         rewritten = query if fast_mode else self.rewriter.rewrite(query)
         final_scope = retrieval_scope or settings.default_retrieval_scope
@@ -73,6 +77,7 @@ class QAService:
         )
 
         if self.cache is not None and not refresh_cache:
+            # 命中缓存：省去检索和大模型调用，显著降低延迟与成本。
             cached = self.cache.get(cache_key)
             if cached is not None:
                 result = copy.deepcopy(cached)
@@ -83,6 +88,7 @@ class QAService:
 
         chunk_map = self.repo.get_kb_chunk_map(kb_id=kb_id, retrieval_scope=final_scope)
         if not chunk_map:
+            # 新手常见问题：知识库为空时不是报错，而是返回可读提示。
             return {
                 "kb_id": kb_id,
                 "query": query,
@@ -146,6 +152,7 @@ class QAService:
         freshness_weight: float | None = None,
         dedup_by_family: bool | None = None,
     ) -> tuple[dict, Iterator[str]]:
+        # 与 ask 逻辑基本一致，差异在于返回 token 迭代器，供 SSE 流式输出。
         rewritten = query if fast_mode else self.rewriter.rewrite(query)
         final_scope = retrieval_scope or settings.default_retrieval_scope
         final_freshness = settings.default_freshness_weight if freshness_weight is None else float(freshness_weight)
@@ -266,6 +273,8 @@ class QAService:
         freshness_weight: float,
         dedup_by_family: bool,
     ):
+        # 检索流水线：
+        # 关键词过滤（可选） -> 混合检索 -> 轻关键词加分 -> 重排 -> 新鲜度+去重
         active_chunk_map, keyword_meta = self._apply_keyword_layer(query=rewritten, chunk_map=chunk_map)
         effective_multiplier = 2 if fast_mode else candidate_multiplier
         hits = self.retriever.search(
@@ -291,6 +300,7 @@ class QAService:
 
     @staticmethod
     def _citation_from_hit(hit) -> dict:
+        # 把内部检索命中对象转换成 API 返回格式，前端可直接渲染来源与预览内容。
         metadata = hit.metadata or {}
         source_type = metadata.get("source_type", "text")
         file_suffix = metadata.get("file_suffix", "")
@@ -313,6 +323,8 @@ class QAService:
         }
 
     def _apply_keyword_layer(self, query: str, chunk_map: dict[str, dict]) -> tuple[dict[str, dict], dict]:
+        # 强关键词过滤层：用于缩小候选集合，提高召回精度和效率。
+        # 保护机制：若过滤后太少，会自动回退到不过滤，避免“误杀”。
         if not settings.enable_keyword_layer:
             return chunk_map, {"strong": [], "weak": [], "enabled": False}
 
@@ -366,6 +378,7 @@ class QAService:
 
     @staticmethod
     def _apply_weak_keyword_boost(hits: list, keywords: list[str]) -> list:
+        # 弱关键词只是“轻微加分”，不会替代主检索分数。
         if not keywords:
             return hits
         lowered = [x.lower() for x in keywords]
@@ -385,6 +398,9 @@ class QAService:
         freshness_weight: float,
         retrieval_scope: str,
     ) -> list:
+        # 对候选结果进行二次排序：
+        # - active_only 模式可加入“新鲜度”偏好
+        # - 可按文档家族去重，避免同一文档多个版本挤占 top_k
         if not hits:
             return []
 
@@ -436,6 +452,7 @@ class QAService:
         return picked
 
     def _build_messages(self, query: str, rewritten: str, hits: list, memory_context: str = "") -> list[dict[str, str]]:
+        # 将检索结果和会话记忆拼成大模型输入提示词。
         if not hits:
             return [
                 {"role": "system", "content": "You are an operations knowledge assistant. Keep answers actionable."},
@@ -484,6 +501,7 @@ class QAService:
             yield "Streaming model call failed. Check SiliconFlow key/network/model settings."
 
     def _build_memory_context(self, kb_id: str, session_id: str, use_memory: bool) -> tuple[str, dict]:
+        # 读取并压缩历史对话，避免上下文过长导致 token 浪费或超限。
         if not use_memory or not session_id:
             return "", {
                 "enabled": False,
@@ -533,6 +551,7 @@ class QAService:
 
     @staticmethod
     def _compress_memory(lines: list[str]) -> str:
+        # 简单压缩策略：保留最近若干轮，并对超长行做“首尾截断”。
         parts = []
         for line in lines[-16:]:
             text = line.strip()
@@ -544,6 +563,7 @@ class QAService:
         return merged[: settings.conversation_summary_max_chars]
 
     def _save_conversation_turn(self, session_id: str, kb_id: str, query: str, answer: str) -> None:
+        # 写入一问一答，并裁剪旧数据，防止会话表无限膨胀。
         self.meta.add_conversation_message(session_id=session_id, kb_id=kb_id, role="user", content=query)
         self.meta.add_conversation_message(session_id=session_id, kb_id=kb_id, role="assistant", content=answer)
         self.meta.delete_conversation_messages_before(

@@ -1,4 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
+"""seed_demo 测试：验证过滤规则与入库文件选择。"""
 
 from pathlib import Path
 
@@ -7,6 +9,8 @@ from hz_bank_rag.examples.seed_demo import seed_demo_data
 
 
 class DummyRepo:
+    """最小仓储桩：只记录批量入库输入。"""
+
     def __init__(self) -> None:
         self.ingested_file_paths: list[str] = []
 
@@ -20,6 +24,7 @@ class DummyRepo:
 
 
 def test_seed_excludes_eval_samples(tmp_path: Path) -> None:
+    """应排除评估样本目录和指定文件名。"""
     demo = tmp_path / "demo_kb"
     eval_dir = demo / "eval_samples"
     demo.mkdir(parents=True, exist_ok=True)

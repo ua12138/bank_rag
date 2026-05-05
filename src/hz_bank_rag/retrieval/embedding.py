@@ -1,4 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
+"""向量化模块：把文本转为 embedding。"""
 
 from typing import Iterable
 
@@ -9,13 +11,14 @@ from hz_bank_rag.core.siliconflow_client import SiliconFlowClient, SiliconFlowEr
 
 
 class SiliconFlowEmbedder:
-    """Embedding wrapper backed by SiliconFlow API."""
+    """SiliconFlow 向量生成封装。"""
 
     def __init__(self, model: str | None = None) -> None:
         self.client = SiliconFlowClient()
         self.model = model or settings.siliconflow_embedding_model
 
     def encode(self, texts: Iterable[str]) -> np.ndarray:
+        """将文本集合编码为 `float32` numpy 数组。"""
         text_list = [text for text in texts]
         if not text_list:
             return np.zeros((0, 0), dtype=np.float32)

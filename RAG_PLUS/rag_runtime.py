@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""RAG_PLUS 运行时：复用基础 QAService 并支持按路由选模型。"""
+
 import copy
 import sys
 import time
@@ -39,6 +41,8 @@ from RAG_PLUS.router import RouteDecision
 
 @dataclass
 class RagRuntime:
+    """RAG_PLUS 运行时对象集合。"""
+
     meta: MetadataStore
     repo: RAGRepository
     qa: QAService
@@ -46,6 +50,7 @@ class RagRuntime:
 
 
 def build_runtime() -> RagRuntime:
+    """构建 RAG_PLUS 运行时依赖。"""
     meta = MetadataStore(base_settings.sqlite_path)
     bm25 = BM25Store()
     vector_store = (
@@ -74,8 +79,9 @@ def build_runtime() -> RagRuntime:
 
 
 class AdaptiveQAExecutor:
-    """
-    基于现有 QAService 复用检索与记忆能力，并额外允许按路由结果选择模型。
+    """自适应问答执行器。
+
+    复用 QAService 的检索与记忆能力，并按路由结果选择模型。
     """
 
     def __init__(self, runtime: RagRuntime) -> None:
@@ -91,10 +97,11 @@ class AdaptiveQAExecutor:
         session_id: str,
         use_memory: bool,
     ) -> dict[str, Any]:
+        """执行一次按路由策略的问答。"""
         qa = self.runtime.qa
         start = time.perf_counter()
 
-        # 简单问题跳过 rewrite，复杂问题开启 rewrite。
+        # 简单问题跳过 rewrite，复杂问题启用 rewrite。
         fast_mode = route.level == "simple"
         rewritten = query if fast_mode else qa.rewriter.rewrite(query)
 

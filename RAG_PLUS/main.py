@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""RAG_PLUS 主入口：鉴权、路由、限流、分布式并发控制、工作流。"""
+
 import threading
 import sys
 from pathlib import Path
@@ -37,7 +39,7 @@ from RAG_PLUS.workflow import MixedIntentWorkflowEngine
 
 
 class LocalConcurrencyGuard:
-    """本地并发舱壁，避免单实例被瞬时流量拖垮。"""
+    """本地并发舱壁：避免单实例被瞬时流量打满。"""
 
     def __init__(self, max_inflight: int) -> None:
         self._sem = threading.BoundedSemaphore(value=max(1, max_inflight))
@@ -53,6 +55,7 @@ class LocalConcurrencyGuard:
 
 
 def build_app() -> FastAPI:
+    """构建 RAG_PLUS FastAPI 应用。"""
     app = FastAPI(
         title="HZ Bank RAG PLUS",
         version="1.0.0",
@@ -69,9 +72,7 @@ def build_app() -> FastAPI:
     local_guard = LocalConcurrencyGuard(max_inflight=plus_settings.max_inflight_global)
     bearer = HTTPBearer(auto_error=False)
 
-    def current_user(
-        creds: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
-    ) -> UserClaims:
+    def current_user(creds: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]) -> UserClaims:
         if creds is None or not creds.credentials:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="missing bearer token")
         return auth_service.token_manager.verify(creds.credentials)
@@ -101,11 +102,7 @@ def build_app() -> FastAPI:
     @app.post(f"{plus_settings.api_prefix}/auth/token", response_model=TokenResponse)
     def issue_token(req: TokenRequest) -> TokenResponse:
         token, scopes = auth_service.login(username=req.username, password=req.password)
-        return TokenResponse(
-            access_token=token,
-            expires_in=plus_settings.auth_token_ttl_seconds,
-            scopes=scopes,
-        )
+        return TokenResponse(access_token=token, expires_in=plus_settings.auth_token_ttl_seconds, scopes=scopes)
 
     @app.post(f"{plus_settings.api_prefix}/query")
     def plus_query(req: PlusQueryRequest, claims: Annotated[UserClaims, Depends(current_user)], request: Request) -> dict:
@@ -113,27 +110,15 @@ def build_app() -> FastAPI:
 
         # 用户级限流（按分钟窗口）
         rate_key = f"user:{claims.sub}"
-        if not redis_runtime.allow_rate(
-            key=rate_key,
-            limit=plus_settings.rate_limit_per_user_per_minute,
-            window_seconds=60,
-        ):
+        if not redis_runtime.allow_rate(key=rate_key, limit=plus_settings.rate_limit_per_user_per_minute, window_seconds=60):
             raise HTTPException(status_code=429, detail="rate limit exceeded, please retry later")
 
-        # 本地舱壁 + 分布式槽位，避免高并发把实例/依赖打满
+        # 本地舱壁 + 分布式槽位，避免高并发把实例/依赖打满。
         if not local_guard.acquire():
             raise HTTPException(status_code=429, detail="server is busy, local inflight limit reached")
 
-        global_slot = redis_runtime.acquire_slot(
-            bucket="global",
-            max_inflight=plus_settings.max_inflight_global,
-            ttl_seconds=plus_settings.inflight_slot_ttl_seconds,
-        )
-        kb_slot = redis_runtime.acquire_slot(
-            bucket=f"kb:{req.kb_id}",
-            max_inflight=plus_settings.max_inflight_per_kb,
-            ttl_seconds=plus_settings.inflight_slot_ttl_seconds,
-        )
+        global_slot = redis_runtime.acquire_slot(bucket="global", max_inflight=plus_settings.max_inflight_global, ttl_seconds=plus_settings.inflight_slot_ttl_seconds)
+        kb_slot = redis_runtime.acquire_slot(bucket=f"kb:{req.kb_id}", max_inflight=plus_settings.max_inflight_per_kb, ttl_seconds=plus_settings.inflight_slot_ttl_seconds)
         if not global_slot or not kb_slot:
             local_guard.release()
             if global_slot:
@@ -148,7 +133,6 @@ def build_app() -> FastAPI:
                 f"q:{req.kb_id}:{redis_runtime.stable_hash(req.query)}:"
                 f"{req.top_k}:{req.candidate_multiplier}:{route.selected_model}:{req.session_id}:{int(req.use_memory)}"
             )
-
             if not req.refresh_cache:
                 cached = redis_runtime.get_json(cache_key)
                 if cached is not None:
@@ -167,10 +151,7 @@ def build_app() -> FastAPI:
             )
             result["cache_hit"] = False
             result["route"] = route.to_dict()
-            result["request_meta"] = {
-                "client": request.client.host if request.client else "",
-                "user": claims.sub,
-            }
+            result["request_meta"] = {"client": request.client.host if request.client else "", "user": claims.sub}
             redis_runtime.set_json(cache_key, result, ttl_seconds=plus_settings.redis_cache_ttl_seconds)
             return result
         finally:
@@ -205,25 +186,14 @@ def build_app() -> FastAPI:
     @app.post(f"{plus_settings.api_prefix}/mcp/tools/search")
     def search_tools(req: ToolSearchRequest, claims: Annotated[UserClaims, Depends(current_user)]) -> dict:
         require_scopes(claims, ["tools:read"])
-        rows = registry.search(
-            query=req.query,
-            caller_scopes=claims.scopes,
-            required_tags=req.required_tags,
-            limit=req.limit,
-        )
+        rows = registry.search(query=req.query, caller_scopes=claims.scopes, required_tags=req.required_tags, limit=req.limit)
         return {"count": len(rows), "tools": rows}
 
     @app.post(f"{plus_settings.api_prefix}/workflow/run")
     def run_workflow(req: WorkflowRunRequest, claims: Annotated[UserClaims, Depends(current_user)]) -> dict:
         require_scopes(claims, ["workflow:run", "rag:query"])
 
-        def qa_wrapper(
-            kb_id: str,
-            query: str,
-            top_k: int,
-            candidate_multiplier: int,
-            session_id: str,
-        ) -> dict:
+        def qa_wrapper(kb_id: str, query: str, top_k: int, candidate_multiplier: int, session_id: str) -> dict:
             route = router.route(query)
             return adaptive_qa.ask(
                 kb_id=kb_id,
@@ -263,6 +233,6 @@ app = build_app()
 
 
 def run() -> None:
+    """本地启动入口。"""
     import uvicorn
-
     uvicorn.run("RAG_PLUS.main:app", host="0.0.0.0", port=8092, reload=False)

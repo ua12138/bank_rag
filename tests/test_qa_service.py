@@ -1,4 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
+"""QAService 单元测试：缓存、记忆压缩、家族去重。"""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +13,8 @@ from hz_bank_rag.storage.metadata_store import MetadataStore
 
 @dataclass
 class DummyRepo:
+    """最小仓储桩：只提供 `get_kb_chunk_map`。"""
+
     kb_chunk_map: dict[str, dict]
 
     def get_kb_chunk_map(self, kb_id: str, retrieval_scope: str = "active_only") -> dict[str, dict]:
@@ -18,21 +22,28 @@ class DummyRepo:
 
 
 class DummyRetriever:
+    """最小检索桩。"""
+
     def search(self, **kwargs):
         return []
 
 
 class DummyRewriter:
+    """最小改写桩。"""
+
     def rewrite(self, query: str) -> str:
         return query
 
 
 class DummyReranker:
+    """最小重排桩。"""
+
     def rerank(self, query, hits, top_k=5):
         return hits[:top_k]
 
 
 def _build_service(tmp_path: Path) -> QAService:
+    """构造一个可测试的 QAService（无外部依赖）。"""
     meta = MetadataStore(str(tmp_path / "qa_service.db"))
     repo = DummyRepo(
         kb_chunk_map={
@@ -48,6 +59,7 @@ def _build_service(tmp_path: Path) -> QAService:
 
 
 def test_query_cache_hit(tmp_path: Path, monkeypatch) -> None:
+    """同请求重复调用应命中缓存，检索只执行一次。"""
     settings.enable_query_cache = True
     settings.query_cache_ttl_seconds = 300
     settings.query_cache_max_size = 20
@@ -80,6 +92,7 @@ def test_query_cache_hit(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_memory_compression(tmp_path: Path) -> None:
+    """会话历史过长时应触发压缩。"""
     settings.conversation_max_turns = 2
     settings.conversation_max_chars = 80
     settings.conversation_summary_max_chars = 40
@@ -95,6 +108,7 @@ def test_memory_compression(tmp_path: Path) -> None:
 
 
 def test_family_dedup_prefers_newest(tmp_path: Path) -> None:
+    """同 family 去重时应优先保留更新版本。"""
     service = _build_service(tmp_path)
     hits = [
         RetrievalHit(

@@ -5,6 +5,8 @@ import re
 from abc import ABC, abstractmethod
 from typing import Any
 
+# 向量存储模块：抽象统一向量库接口，并提供内存版与 Milvus 版实现。
+
 import numpy as np
 
 from hz_bank_rag.core.config import milvus_fields, settings
@@ -29,7 +31,7 @@ def _slug(value: str, max_len: int = 24) -> str:
 
 
 class BaseVectorStore(ABC):
-    """Base interface for vector stores."""
+    """向量存储抽象接口。"""
 
     def __init__(self, dim: int = 1024) -> None:
         self.dim = dim
@@ -71,7 +73,7 @@ class BaseVectorStore(ABC):
 
 
 class InMemoryVectorStore(BaseVectorStore):
-    """Fallback in-memory vector store."""
+    """内存向量库实现（本地开发/降级兜底）。"""
 
     def __init__(self, dim: int = 1024) -> None:
         super().__init__(dim=dim)
@@ -113,7 +115,7 @@ class InMemoryVectorStore(BaseVectorStore):
 
 
 class MilvusVectorStore(BaseVectorStore):
-    """Milvus store with dense + BM25 sparse retrieval, and dense-only fallback."""
+    """Milvus 向量库实现（支持稠密+稀疏检索，并含稠密兜底）。"""
 
     def __init__(
         self,

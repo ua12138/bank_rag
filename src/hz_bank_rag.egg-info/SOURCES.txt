@@ -22,7 +22,11 @@ src/hz_bank_rag/ingestion/__init__.py
 src/hz_bank_rag/ingestion/chunker.py
 src/hz_bank_rag/ingestion/cleaner.py
 src/hz_bank_rag/ingestion/document_parser.py
+src/hz_bank_rag/ingestion/keywords.py
 src/hz_bank_rag/ingestion/multimodal.py
+src/hz_bank_rag/mcp/__init__.py
+src/hz_bank_rag/mcp/main.py
+src/hz_bank_rag/mcp/runtime.py
 src/hz_bank_rag/retrieval/__init__.py
 src/hz_bank_rag/retrieval/embedding.py
 src/hz_bank_rag/retrieval/hybrid_retriever.py
@@ -30,9 +34,14 @@ src/hz_bank_rag/retrieval/query_rewrite.py
 src/hz_bank_rag/retrieval/reranker.py
 src/hz_bank_rag/service/__init__.py
 src/hz_bank_rag/service/qa_service.py
+src/hz_bank_rag/service/query_cache.py
 src/hz_bank_rag/storage/__init__.py
 src/hz_bank_rag/storage/bm25_store.py
 src/hz_bank_rag/storage/metadata_store.py
 src/hz_bank_rag/storage/rag_repository.py
 src/hz_bank_rag/storage/vector_store.py
+tests/test_mcp_wrapper.py
+tests/test_metadata_store.py
+tests/test_qa_service.py
+tests/test_seed_demo.py
 tests/test_smoke.py

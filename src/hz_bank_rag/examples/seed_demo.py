@@ -1,4 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
+"""示例数据灌库脚本：把 demo 文档批量导入知识库。"""
 
 from pathlib import Path
 
@@ -12,7 +14,7 @@ from hz_bank_rag.storage.vector_store import InMemoryVectorStore, MilvusVectorSt
 
 SUPPORTED_SUFFIXES = set(TEXT_SUFFIXES) | set(PDF_SUFFIXES) | set(WORD_SUFFIXES) | set(PPT_SUFFIXES) | set(IMAGE_SUFFIXES)
 
-# Keep evaluation fixtures outside ingest scope.
+# 评估数据不参与 demo 灌库，避免污染检索样本。
 EXCLUDED_FILE_NAMES = {
     "ragas_dataset_samples.json",
     "ragas_eval.json",
@@ -22,6 +24,7 @@ EXCLUDED_DIR_NAMES = {"eval_samples", "evaluation", "fixtures"}
 
 
 def build_repository() -> RAGRepository:
+    """构建一个可直接入库的仓储实例。"""
     metadata = MetadataStore(settings.sqlite_path)
     bm25 = BM25Store()
     vector_store = (
@@ -40,6 +43,7 @@ def build_repository() -> RAGRepository:
 
 
 def _resolve_demo_dir(data_dir: Path) -> Path:
+    """兼容两种目录形态：`data/` 或 `data/demo_kb/`。"""
     direct = data_dir
     nested = data_dir / "demo_kb"
     if direct.exists() and any(child.is_file() for child in direct.iterdir()):
@@ -50,6 +54,7 @@ def _resolve_demo_dir(data_dir: Path) -> Path:
 
 
 def _collect_demo_files(resolved_dir: Path) -> tuple[list[str], list[str]]:
+    """扫描可入库文件，并返回 `(可入库列表, 跳过列表)`。"""
     file_paths: list[str] = []
     skipped: list[str] = []
 
@@ -73,6 +78,11 @@ def _collect_demo_files(resolved_dir: Path) -> tuple[list[str], list[str]]:
 
 
 def seed_demo_data(repo: RAGRepository, kb_id: str, data_dir: Path) -> dict:
+    """执行 demo 灌库。
+
+    返回:
+    - 入库数量、入库文件、跳过文件及排除规则，方便排查。
+    """
     resolved_dir = _resolve_demo_dir(data_dir)
     if not resolved_dir.exists():
         return {
@@ -110,6 +120,7 @@ def seed_demo_data(repo: RAGRepository, kb_id: str, data_dir: Path) -> dict:
 
 
 def main() -> None:
+    """本地命令行入口。"""
     repo = build_repository()
     result = seed_demo_data(repo=repo, kb_id=settings.default_kb_id, data_dir=Path(settings.data_dir))
     print(result)

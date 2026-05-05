@@ -29,14 +29,18 @@ from hz_bank_rag.storage.vector_store import InMemoryVectorStore, MilvusVectorSt
 
 
 def build_app() -> FastAPI:
+    # 应用装配入口：这里把“存储层 + 检索层 + 服务层 + HTTP 路由”一次性连接起来。
     app = FastAPI(
         title="HZ Bank Production RAG",
         version="0.5.0",
         description="Hangzhou Bank production operation center intelligent QA system.",
     )
 
+    # 1) 元数据存储（SQLite）：文档信息、分块信息、会话记忆、bad case 都在这里。
     meta = MetadataStore(settings.sqlite_path)
+    # 2) 稀疏检索器（BM25）：负责关键词匹配。
     bm25 = BM25Store()
+    # 3) 向量检索器：可切换 Milvus（生产）或内存版（本地学习/测试）。
     vector_store = (
         MilvusVectorStore(
             uri=settings.milvus_uri,
@@ -50,8 +54,11 @@ def build_app() -> FastAPI:
         else InMemoryVectorStore(settings.vector_dim)
     )
 
+    # 4) 仓储层：统一封装“文档入库、切分、索引重建、删除”等能力。
     repo = RAGRepository(metadata=meta, vector_store=vector_store, bm25=bm25)
+    # 5) 检索层：把 BM25 + 向量检索融合。
     retriever = HybridRetriever(bm25_store=bm25, vector_store=vector_store)
+    # 6) 问答服务层：把改写、检索、重排、生成答案组织成一条流水线。
     qa_service = QAService(
         repo=repo,
         retriever=retriever,
@@ -63,6 +70,7 @@ def build_app() -> FastAPI:
 
     @app.get("/health")
     def health() -> dict:
+        # 健康检查：除了存活状态，还返回关键配置，便于排查“为什么效果不对/服务不可用”。
         return {
             "status": "ok",
             "app": settings.app_name,
@@ -90,6 +98,7 @@ def build_app() -> FastAPI:
 
     @app.post("/knowledge-bases/{kb_id}/documents")
     def ingest_document(kb_id: str, req: IngestRequest) -> dict:
+        # 单文档入库入口：文件 -> 解析 -> 清洗 -> 分块 -> 向量/BM25 索引。
         try:
             return repo.ingest_document(
                 kb_id=kb_id,
@@ -128,6 +137,7 @@ def build_app() -> FastAPI:
 
     @app.post("/query")
     def query(req: QueryRequest) -> dict:
+        # 同步问答：一次请求直接返回完整答案。
         try:
             return qa_service.ask(
                 kb_id=req.kb_id,
@@ -147,6 +157,7 @@ def build_app() -> FastAPI:
 
     @app.post("/query/stream")
     def query_stream(req: QueryRequest) -> StreamingResponse:
+        # 流式问答：先返回元信息，再按 token 逐步返回答案（SSE 协议）。
         try:
             meta_info, token_iter = qa_service.ask_stream(
                 kb_id=req.kb_id,
@@ -164,6 +175,7 @@ def build_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         def event_generator():
+            # 前端需要先拿到 citations 等元数据，再消费 token 流。
             yield f"data: {json.dumps({'type': 'meta', 'payload': meta_info}, ensure_ascii=False)}\n\n"
             for token in token_iter:
                 yield f"data: {json.dumps({'type': 'token', 'payload': token}, ensure_ascii=False)}\n\n"
@@ -173,6 +185,7 @@ def build_app() -> FastAPI:
 
     @app.post("/bad-cases")
     def bad_case(req: BadCaseRequest) -> dict:
+        # bad case 记录入口：用于沉淀线上失败样本，支持后续评估与回归。
         return qa_service.record_bad_case(
             kb_id=req.kb_id,
             query=req.query,
@@ -250,6 +263,7 @@ def build_app() -> FastAPI:
         kb_id: str = Query(..., description="Knowledge base id"),
         limit: int = Query(default=40, ge=1, le=200, description="Result limit"),
     ) -> dict:
+        # 拉取多轮会话历史，用于调试 memory 是否生效。
         messages = meta.get_conversation_messages(session_id=session_id, kb_id=kb_id, limit=limit)
         return {
             "session_id": session_id,
@@ -264,10 +278,12 @@ def build_app() -> FastAPI:
 
     @app.post("/evaluate/ragas")
     def evaluate_ragas(req: EvalRequest) -> dict:
+        # 轻量评估：用于快速验证改动前后效果趋势。
         return ragas_runner.evaluate(req.dataset, pipeline="lightweight")
 
     @app.post("/evaluate/ragas/official")
     def evaluate_ragas_official(req: EvalRequest) -> dict:
+        # 官方评估：指标更全，耗时通常更高。
         return ragas_runner.evaluate(req.dataset, pipeline="official")
 
     @app.post("/evaluate/ragas/ab")

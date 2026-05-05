@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""BM25 存储模块：按知识库维度维护关键词检索索引。"""
+
 import jieba
 from rank_bm25 import BM25Okapi
 
@@ -13,6 +15,7 @@ class BM25Store:
         self._texts: dict[str, list[str]] = {}
 
     def rebuild(self, kb_id: str, chunk_map: dict[str, str]) -> None:
+        """重建某个知识库的 BM25 索引。"""
         chunk_ids = list(chunk_map.keys())
         self._chunk_ids[kb_id] = chunk_ids
         self._texts[kb_id] = [chunk_map[cid] for cid in chunk_ids]
@@ -20,11 +23,13 @@ class BM25Store:
         self._indexes[kb_id] = BM25Okapi(tokenized) if tokenized else None
 
     def clear(self, kb_id: str) -> None:
+        """清理某个知识库索引。"""
         self._indexes.pop(kb_id, None)
         self._chunk_ids.pop(kb_id, None)
         self._texts.pop(kb_id, None)
 
     def search(self, kb_id: str, query: str, top_k: int = 5) -> list[tuple[str, float]]:
+        """执行关键词检索并返回 `(chunk_id, score)` 列表。"""
         index = self._indexes.get(kb_id)
         if index is None:
             return []

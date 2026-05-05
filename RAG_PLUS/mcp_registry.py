@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""MCP 注册中心：工具注册、可见性控制、检索排序。"""
+
 import json
 import re
 import threading
@@ -11,6 +13,8 @@ from RAG_PLUS.redis_runtime import RedisRuntime
 
 @dataclass
 class ToolSpec:
+    """工具元信息。"""
+
     tool_id: str
     name: str
     description: str
@@ -28,11 +32,12 @@ class ToolSpec:
 
 
 class MCPRegistry:
-    """
-    企业级 MCP 工具注册中心（轻量实现）：
+    """企业级 MCP 工具注册中心（轻量实现）。
+
+    能力:
     - 注册工具
-    - 条件过滤与语义近似检索
-    - 基于 scope 的可见性控制
+    - 按关键词/标签检索
+    - 按 scope 做可见性控制
     """
 
     def __init__(self, runtime: RedisRuntime) -> None:
@@ -41,16 +46,14 @@ class MCPRegistry:
         self._lock = threading.Lock()
 
     def register(self, spec: ToolSpec) -> ToolSpec:
+        """注册或覆盖一个工具。"""
         with self._lock:
             self._tools[spec.tool_id] = spec
-        self.runtime.set_json(
-            key=f"mcp:tool:{spec.tool_id}",
-            value=spec.to_dict(),
-            ttl_seconds=86400 * 30,
-        )
+        self.runtime.set_json(key=f"mcp:tool:{spec.tool_id}", value=spec.to_dict(), ttl_seconds=86400 * 30)
         return spec
 
     def list_tools(self, caller_scopes: list[str]) -> list[dict[str, Any]]:
+        """列出调用者可见的工具。"""
         visible: list[dict[str, Any]] = []
         with self._lock:
             for spec in self._tools.values():
@@ -65,6 +68,7 @@ class MCPRegistry:
         required_tags: list[str] | None = None,
         limit: int = 8,
     ) -> list[dict[str, Any]]:
+        """搜索工具并按综合分排序。"""
         q_tokens = self._tokens(query)
         tags = set([x.lower() for x in (required_tags or [])])
         rows: list[tuple[float, ToolSpec]] = []
@@ -80,42 +84,39 @@ class MCPRegistry:
 
             text = f"{spec.name} {spec.description} {' '.join(spec.tags)}".lower()
             score = 0.0
-
             for tok in q_tokens:
                 if tok in text:
                     score += 1.8
 
-            # 结合稳定性做重排：健康度越高、时延越低优先
+            # 稳定性加权：健康度越高、延迟越低越优先。
             score += spec.health_score * 1.5
             score += 1.0 / max(1, spec.avg_latency_ms / 50)
             rows.append((score, spec))
 
         rows.sort(key=lambda x: x[0], reverse=True)
-        return [
-            {
-                "score": round(score, 4),
-                **spec.to_dict(),
-            }
-            for score, spec in rows[: max(1, limit)]
-        ]
+        return [{"score": round(score, 4), **spec.to_dict()} for score, spec in rows[: max(1, limit)]]
 
     @staticmethod
     def _allowed(caller_scopes: list[str], required_scopes: list[str]) -> bool:
+        """校验调用者 scope 是否满足要求。"""
         caller = set(caller_scopes)
         return all(scope in caller or "rag:admin" in caller for scope in required_scopes)
 
     @staticmethod
     def _tokens(text: str) -> list[str]:
+        """分词（简化规则）。"""
         txt = (text or "").lower()
         parts = re.split(r"[\s,，。；;:：\n\t]+", txt)
         return [p for p in parts if p]
 
     def export_snapshot(self) -> dict[str, Any]:
+        """导出当前注册中心快照。"""
         with self._lock:
             data = [tool.to_dict() for tool in self._tools.values()]
         return {"count": len(data), "tools": data}
 
     def import_snapshot(self, payload: dict[str, Any]) -> int:
+        """导入快照（容错模式）。"""
         rows = payload.get("tools", [])
         loaded = 0
         with self._lock:
@@ -127,4 +128,3 @@ class MCPRegistry:
                 self._tools[spec.tool_id] = spec
                 loaded += 1
         return loaded
-

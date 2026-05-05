@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""智能路由模块：根据问题复杂度选择模型池与策略。"""
+
 from dataclasses import asdict, dataclass
 
 from RAG_PLUS.config import plus_settings
@@ -8,6 +10,8 @@ from RAG_PLUS.redis_runtime import RedisRuntime
 
 @dataclass
 class RouteDecision:
+    """路由决策结果。"""
+
     complexity_score: int
     level: str
     risky: bool
@@ -20,10 +24,10 @@ class RouteDecision:
 
 
 class SmartModelRouter:
-    """
-    智能路由器：
-    - 简单问题 -> 小模型（低成本低时延）
-    - 复杂问题 -> 大模型（高质量）
+    """智能路由器。
+
+    - 简单问题 -> 小模型（低成本、低延迟）
+    - 复杂问题 -> 大模型（更高质量）
     - 高风险问题 -> 风险模型池（更保守）
     """
 
@@ -31,23 +35,13 @@ class SmartModelRouter:
         self.runtime = runtime
 
     def route(self, query: str) -> RouteDecision:
+        """对单次查询做路由决策。"""
         text = (query or "").strip()
         length_score = min(len(text) // 12, 40)
 
-        complex_tokens = [
-            "对比",
-            "根因",
-            "排障",
-            "多轮",
-            "上下文",
-            "流程",
-            "架构",
-            "优化",
-            "为什么",
-            "如何",
-        ]
+        complex_tokens = ["对比", "根因", "排障", "多轮", "上下文", "流程", "架构", "优化", "为什么", "如何"]
         complex_score = sum(5 for token in complex_tokens if token in text)
-        multi_clause_bonus = 12 if text.count("，") + text.count("。") + text.count("?") + text.count("？") >= 3 else 0
+        multi_clause_bonus = 12 if text.count("，") + text.count("。") + text.count("?") + text.count("；") >= 3 else 0
 
         risky_tokens = ["删库", "重启生产", "故障切换", "紧急变更", "回滚", "资金", "合规", "审计"]
         risky = any(token in text for token in risky_tokens)
@@ -88,4 +82,3 @@ class SmartModelRouter:
             selected_model=selected_model,
             use_rerank=use_rerank,
         )
-

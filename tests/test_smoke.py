@@ -1,4 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
+"""烟雾测试：验证服务基础可用与最小端到端流程。"""
 
 import json
 import os
@@ -12,6 +14,7 @@ from hz_bank_rag.core.config import settings
 
 
 def test_health(tmp_path: Path) -> None:
+    """健康检查接口应返回 200 且 status=ok。"""
     settings.use_milvus = False
     settings.sqlite_path = str(tmp_path / "test_health.db")
     app = build_app()
@@ -22,6 +25,7 @@ def test_health(tmp_path: Path) -> None:
 
 
 def test_end_to_end_flow(tmp_path: Path) -> None:
+    """最小端到端：seed -> query -> evaluate。"""
     if not (settings.siliconflow_api_key or os.getenv("HZ_RAG_SILICONFLOW_API_KEY")):
         pytest.skip("HZ_RAG_SILICONFLOW_API_KEY is not configured")
 

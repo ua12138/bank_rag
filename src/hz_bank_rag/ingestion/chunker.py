@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""文本分块模块：把长文档切成可检索的小块。"""
+
 import re
 from typing import Literal
 
@@ -9,10 +11,10 @@ ChunkStrategy = Literal["semantic", "recursive"]
 
 
 class Chunker:
-    """文档切分器。
+    """文档分块器。
 
-    1. semantic 适合结构较强的运维手册。
-    2. recursive 适合通用场景，稳定性更好。
+    - `semantic`：先按标题/段落切，更保留原文结构。
+    - `recursive`：通用稳定，优先保证块大小接近配置值。
     """
 
     def __init__(self, chunk_size: int = 450, overlap: int = 80) -> None:
@@ -26,16 +28,17 @@ class Chunker:
         )
 
     def split(self, text: str, strategy: ChunkStrategy = "recursive") -> list[str]:
+        """按策略分块并返回文本块列表。"""
         if strategy == "semantic":
             return self.semantic_chunk(text)
         return self.recursive_chunk(text)
 
     def recursive_chunk(self, text: str) -> list[str]:
-        # 递归切分会优先按较大的语义边界拆分，不够时再继续细分。
+        """递归分块：优先按较大语义边界切，不够再细分。"""
         return [chunk.strip() for chunk in self.recursive_splitter.split_text(text) if chunk.strip()]
 
     def semantic_chunk(self, text: str) -> list[str]:
-        # 先按标题和空行切段，尽量保留原始文档结构。
+        """语义分块：先按标题/空行切段，超长段再用滑窗切。"""
         blocks = [block.strip() for block in re.split(r"\n(?=#{1,6}\s)|\n\n", text) if block.strip()]
         chunks: list[str] = []
         current = ""
@@ -66,4 +69,5 @@ class Chunker:
 
 
 def semantic_chunk(text: str, chunk_size: int = 450, overlap: int = 80) -> list[str]:
+    """函数式入口：直接进行语义分块。"""
     return Chunker(chunk_size=chunk_size, overlap=overlap).semantic_chunk(text)

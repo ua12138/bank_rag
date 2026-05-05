@@ -6,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+# 回归脚本：串行调用关键接口并输出回归报告（JSON + Markdown）。
+
 from fastapi.testclient import TestClient
 
 from hz_bank_rag.api.main import build_app

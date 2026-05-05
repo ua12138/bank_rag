@@ -1,4 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
+"""核心类型定义：统一项目中的数据结构。"""
 
 from dataclasses import dataclass, field
 from typing import Any
@@ -6,7 +8,7 @@ from typing import Any
 
 @dataclass
 class Chunk:
-    """A normalized chunk record for storage/retrieval."""
+    """标准化分块记录（用于存储与检索）。"""
 
     chunk_id: str
     kb_id: str
@@ -17,7 +19,7 @@ class Chunk:
 
 @dataclass
 class RetrievalHit:
-    """Unified retrieval hit for sparse+dense+rerank stages."""
+    """统一检索命中结构（稀疏 + 稠密 + 重排阶段复用）。"""
 
     chunk_id: str
     doc_id: str

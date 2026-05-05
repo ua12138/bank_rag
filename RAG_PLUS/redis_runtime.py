@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Redis 运行时封装：缓存、限流、并发槽位、轮询选模。"""
+
 import hashlib
 import json
 import threading
@@ -15,11 +17,12 @@ except Exception:  # pragma: no cover
 
 
 class RedisRuntime:
-    """
-    Redis 运行时封装：
+    """Redis 运行时封装。
+
+    能力:
     1) 查询缓存
     2) 限流计数
-    3) 并发槽位控制（简单分布式回压）
+    3) 并发槽位控制（分布式回压）
     4) 模型池轮询（负载均衡）
     """
 
@@ -29,7 +32,7 @@ class RedisRuntime:
         self._client = None
         self._lock = threading.Lock()
 
-        # 本地降级存储
+        # 本地降级存储（Redis 不可用时兜底）
         self._local_cache: dict[str, tuple[float, Any]] = {}
         self._local_counter: dict[str, tuple[int, float]] = {}
         self._local_rr: dict[str, int] = {}
@@ -48,9 +51,11 @@ class RedisRuntime:
 
     @staticmethod
     def stable_hash(text: str) -> str:
+        """生成稳定 hash，用于缓存 key。"""
         return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
     def get_json(self, key: str) -> dict[str, Any] | None:
+        """读取 JSON 缓存。"""
         if self.enabled and self._client is not None:
             val = self._client.get(self._k(key))
             if not val:
@@ -72,17 +77,17 @@ class RedisRuntime:
             return val
 
     def set_json(self, key: str, value: dict[str, Any], ttl_seconds: int) -> None:
+        """写入 JSON 缓存。"""
         if self.enabled and self._client is not None:
             self._client.setex(self._k(key), max(1, ttl_seconds), json.dumps(value, ensure_ascii=False))
             return
-
         with self._lock:
             self._local_cache[key] = (time.time() + max(1, ttl_seconds), value)
 
     def allow_rate(self, key: str, limit: int, window_seconds: int) -> bool:
+        """固定窗口限流。"""
         if limit <= 0:
             return True
-
         if self.enabled and self._client is not None:
             full_key = self._k(f"rl:{key}:{int(time.time() // window_seconds)}")
             value = self._client.incr(full_key)
@@ -102,9 +107,9 @@ class RedisRuntime:
             return count <= limit
 
     def acquire_slot(self, bucket: str, max_inflight: int, ttl_seconds: int) -> bool:
+        """申请并发槽位。"""
         if max_inflight <= 0:
             return True
-
         if self.enabled and self._client is not None:
             key = self._k(f"slot:{bucket}")
             value = self._client.incr(key)
@@ -123,6 +128,7 @@ class RedisRuntime:
             return True
 
     def release_slot(self, bucket: str) -> None:
+        """释放并发槽位。"""
         if self.enabled and self._client is not None:
             key = self._k(f"slot:{bucket}")
             try:
@@ -139,6 +145,7 @@ class RedisRuntime:
                 self._local_slot[bucket] = used - 1
 
     def select_from_pool(self, name: str, pool: list[str]) -> str:
+        """从模型池轮询选择一个模型。"""
         if not pool:
             return ""
         if len(pool) == 1:
@@ -153,4 +160,3 @@ class RedisRuntime:
             idx = self._local_rr.get(name, 0)
             self._local_rr[name] = idx + 1
             return pool[idx % len(pool)]
-

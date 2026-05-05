@@ -1,20 +1,28 @@
 from __future__ import annotations
 
+"""API 请求模型定义：约束每个接口的输入参数。"""
+
 from pydantic import BaseModel, Field
 
 
 class IngestRequest(BaseModel):
-    file_path: str = Field(..., description="Document path")
-    parser_type: str = Field(default="auto", description="Parser type")
-    chunk_strategy: str = Field(default="recursive", description="Chunk strategy: recursive|semantic")
+    """单文档入库请求。"""
+
+    file_path: str = Field(..., description="文档路径")
+    parser_type: str = Field(default="auto", description="解析器类型")
+    chunk_strategy: str = Field(default="recursive", description="切分策略: recursive|semantic")
 
 
 class BulkIngestRequest(BaseModel):
-    file_paths: list[str] = Field(..., description="Document path list")
-    chunk_strategy: str = Field(default="recursive", description="Chunk strategy")
+    """批量入库请求。"""
+
+    file_paths: list[str] = Field(..., description="文档路径列表")
+    chunk_strategy: str = Field(default="recursive", description="切分策略")
 
 
 class QueryRequest(BaseModel):
+    """问答请求。"""
+
     kb_id: str
     query: str
     top_k: int = 5
@@ -29,6 +37,8 @@ class QueryRequest(BaseModel):
 
 
 class BadCaseRequest(BaseModel):
+    """bad case 记录请求。"""
+
     kb_id: str
     query: str
     rewritten_query: str = ""
@@ -48,6 +58,8 @@ class BadCaseRequest(BaseModel):
 
 
 class BadCaseSnapshotRequest(BaseModel):
+    """构建检索快照请求。"""
+
     kb_id: str
     query: str
     rewritten_query: str = ""
@@ -60,15 +72,21 @@ class BadCaseSnapshotRequest(BaseModel):
 
 
 class EvalRequest(BaseModel):
+    """RAGAS 评估请求。"""
+
     dataset: list[dict]
 
 
 class RagasBuildSample(BaseModel):
+    """构建评估数据集时的单条样本。"""
+
     question: str
     ground_truth: str
 
 
 class RagasBuildRequest(BaseModel):
+    """在线构建 RAGAS 数据集请求。"""
+
     kb_id: str
     samples: list[RagasBuildSample]
     top_k: int = 5
@@ -77,5 +95,7 @@ class RagasBuildRequest(BaseModel):
 
 
 class BadCaseListRequest(BaseModel):
+    """bad case 列表查询请求（保留模型）。"""
+
     kb_id: str | None = None
     limit: int = 50

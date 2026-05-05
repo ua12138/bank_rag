@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""混合意图工作流：把问答、工具检索、行动方案串成流程。"""
+
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -8,6 +10,8 @@ from RAG_PLUS.mcp_registry import MCPRegistry
 
 @dataclass
 class WorkflowStep:
+    """工作流步骤定义。"""
+
     step_id: str
     name: str
     depends_on: list[str]
@@ -15,14 +19,15 @@ class WorkflowStep:
 
 
 class MixedIntentWorkflowEngine:
-    """
-    混合意图工作流：
+    """混合意图执行引擎。
+
     1) 意图识别
-    2) 计划拆解（DAG）
+    2) 计划拆解
     3) 执行与聚合
     """
 
     def detect_intents(self, query: str) -> list[str]:
+        """从查询中识别意图标签。"""
         text = (query or "").strip()
         intents = ["qa"]
 
@@ -35,17 +40,14 @@ class MixedIntentWorkflowEngine:
         return intents
 
     def build_plan(self, intents: list[str]) -> list[WorkflowStep]:
+        """根据意图生成步骤 DAG（简化版）。"""
         steps: list[WorkflowStep] = [
             WorkflowStep(step_id="s1", name="retrieve_and_answer", depends_on=[], detail="先基于知识库回答主问题")
         ]
         if "tool_lookup" in intents:
-            steps.append(
-                WorkflowStep(step_id="s2", name="find_tools", depends_on=["s1"], detail="从 MCP 注册中心检索可用工具")
-            )
+            steps.append(WorkflowStep(step_id="s2", name="find_tools", depends_on=["s1"], detail="从 MCP 注册中心检索可用工具"))
         if "action_plan" in intents:
-            steps.append(
-                WorkflowStep(step_id="s3", name="build_action_plan", depends_on=["s1"], detail="生成可执行操作方案并提示风险")
-            )
+            steps.append(WorkflowStep(step_id="s3", name="build_action_plan", depends_on=["s1"], detail="生成可执行操作方案并提示风险"))
         if "report" in intents:
             steps.append(
                 WorkflowStep(
@@ -68,6 +70,7 @@ class MixedIntentWorkflowEngine:
         candidate_multiplier: int,
         session_id: str = "",
     ) -> dict[str, Any]:
+        """执行混合意图工作流。"""
         intents = self.detect_intents(query)
         plan = self.build_plan(intents)
 
@@ -88,7 +91,7 @@ class MixedIntentWorkflowEngine:
             action_plan = [
                 "1) 先确认影响范围与回滚条件",
                 "2) 在低峰窗口执行变更，保留审计日志",
-                "3) 出现异常立即按回滚方案恢复",
+                "3) 出现异常立刻按回滚方案恢复",
             ]
 
         report = ""
@@ -108,4 +111,3 @@ class MixedIntentWorkflowEngine:
             "action_plan": action_plan,
             "report": report,
         }
-

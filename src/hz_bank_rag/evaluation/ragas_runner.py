@@ -4,6 +4,8 @@ import json
 import statistics
 from typing import Any
 
+# 评估模块：支持 lightweight（LLM judge）与 official（RAGAS）两条评估链路。
+
 import pandas as pd
 
 from hz_bank_rag.core.config import settings
@@ -11,6 +13,7 @@ from hz_bank_rag.core.siliconflow_client import SiliconFlowClient, SiliconFlowEr
 
 
 class RagasRunner:
+    """RAGAS 评估执行器。"""
     REQUIRED_COLUMNS = ["question", "answer", "contexts", "ground_truth"]
     METRIC_NAMES = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
     METRIC_DESCRIPTIONS = {

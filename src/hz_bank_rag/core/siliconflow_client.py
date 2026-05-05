@@ -1,4 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
+"""SiliconFlow 客户端：封装 embeddings/rerank/chat/vision 调用。"""
 
 import base64
 import json
@@ -12,11 +14,11 @@ from hz_bank_rag.core.config import settings
 
 
 class SiliconFlowError(RuntimeError):
-    """SiliconFlow API error."""
+    """SiliconFlow API 错误。"""
 
 
 class SiliconFlowClient:
-    """Thin HTTP client for SiliconFlow OpenAI-compatible APIs."""
+    """轻量 HTTP 客户端（兼容 OpenAI 风格接口）。"""
 
     def __init__(
         self,
@@ -29,11 +31,13 @@ class SiliconFlowClient:
         self.timeout_seconds = timeout_seconds or settings.siliconflow_timeout_seconds
 
     def _headers(self) -> dict[str, str]:
+        """构建鉴权请求头。"""
         if not self.api_key:
             raise SiliconFlowError("Missing SiliconFlow API key: set HZ_RAG_SILICONFLOW_API_KEY")
         return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """执行 POST 请求并统一处理 HTTP/JSON 异常。"""
         url = f"{self.base_url}{path}"
         try:
             with httpx.Client(timeout=self.timeout_seconds) as client:
@@ -50,6 +54,7 @@ class SiliconFlowClient:
             raise SiliconFlowError(f"SiliconFlow returned non-JSON body: {response.text[:400]}") from exc
 
     def embeddings(self, texts: list[str], model: str) -> list[list[float]]:
+        """批量生成文本向量。"""
         if not texts:
             return []
 
@@ -76,6 +81,7 @@ class SiliconFlowClient:
         return vectors
 
     def rerank(self, query: str, documents: list[str], model: str, top_n: int) -> list[dict[str, Any]]:
+        """对候选文档进行相关性重排。"""
         body = {"model": model, "query": query, "documents": documents, "top_n": top_n}
         data = self._post("/rerank", body)
         results = data.get("results") if data.get("results") is not None else data.get("data", [])
@@ -98,6 +104,7 @@ class SiliconFlowClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> str:
+        """普通（非流式）对话调用。"""
         body = {
             "model": model,
             "messages": messages,
@@ -120,6 +127,7 @@ class SiliconFlowClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> Iterator[str]:
+        """流式对话调用，逐 token 输出。"""
         url = f"{self.base_url}/chat/completions"
         body = {
             "model": model,
@@ -160,6 +168,7 @@ class SiliconFlowClient:
             raise SiliconFlowError(f"Streaming request to SiliconFlow failed: {exc}") from exc
 
     def vision_ocr(self, image_path: str, prompt: str | None = None) -> str:
+        """视觉 OCR：把图片转 base64 后调用多模态模型识别文字。"""
         path = Path(image_path)
         mime = _guess_mime(path.suffix.lower())
         image_b64 = base64.b64encode(path.read_bytes()).decode("utf-8")
@@ -179,6 +188,7 @@ class SiliconFlowClient:
 
 
 def _guess_mime(suffix: str) -> str:
+    """按文件后缀推断 MIME 类型。"""
     if suffix in {".jpg", ".jpeg"}:
         return "image/jpeg"
     if suffix == ".png":

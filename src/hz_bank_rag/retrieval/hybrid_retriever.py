@@ -10,7 +10,7 @@ from hz_bank_rag.storage.vector_store import BaseVectorStore
 
 
 class HybridRetriever:
-    """BM25 + Vector hybrid retrieval with RRF fusion."""
+    """混合检索器：把 BM25（关键词）与向量检索（语义）融合。"""
 
     def __init__(self, bm25_store: BM25Store, vector_store: BaseVectorStore) -> None:
         self.bm25_store = bm25_store
@@ -24,13 +24,15 @@ class HybridRetriever:
         top_k: int = 5,
         candidate_multiplier: int = 4,
     ) -> list[RetrievalHit]:
+        # candidate_k 通常 > top_k：
+        # 先“宽召回”更多候选，再在后续阶段（重排/去重）收缩到 top_k。
         candidate_k = max(top_k * candidate_multiplier, top_k)
 
         use_milvus_sparse = bool(
             hasattr(self.vector_store, "search_sparse") and getattr(self.vector_store, "sparse_available", False)
         )
 
-        # Run sparse+dense retrieval in parallel to reduce end-to-end latency.
+        # 稀疏检索 + 稠密检索并行执行，降低端到端延迟。
         with ThreadPoolExecutor(max_workers=2) as pool:
             if use_milvus_sparse:
                 sparse_future = pool.submit(self.vector_store.search_sparse, query=query, kb_id=kb_id, top_k=candidate_k)
@@ -59,10 +61,10 @@ class HybridRetriever:
             if chunk_row is None:
                 continue
 
-            # RRF gives robust rank-level fusion across heterogeneous retrievers.
+            # RRF（Reciprocal Rank Fusion）：用排名融合，不直接依赖不同模型分数尺度。
             rrf_score = self._rrf(score_info.get("bm25_rank")) + self._rrf(score_info.get("vector_rank"))
 
-            # Add small normalized-score signal to break ties among same rank patterns.
+            # 归一化分数只做“轻微 tie-break”，避免同排名时完全打平。
             final_score = rrf_score + 0.2 * score_info.get("bm25_norm", 0.0) + 0.2 * score_info.get("vector_norm", 0.0)
 
             merged.append(
@@ -84,12 +86,14 @@ class HybridRetriever:
 
     @staticmethod
     def _rrf(rank: int | None, k: int = 60) -> float:
+        # rank 越靠前（数字越小）分数越高；缺失 rank 返回 0。
         if rank is None:
             return 0.0
         return 1.0 / (k + rank)
 
     @staticmethod
     def _normalize_scores(hits: list[tuple[str, float]]) -> dict[str, float]:
+        # Min-Max 归一化到 [0,1]，用于不同检索器分数的温和对齐。
         if not hits:
             return {}
         values = [score for _, score in hits]

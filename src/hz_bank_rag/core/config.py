@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""全局配置模块：集中管理 RAG 服务的运行参数。"""
+
 from dataclasses import dataclass
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -7,6 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 @dataclass(frozen=True)
 class MilvusFields:
+    """Milvus 字段名约定，避免各处硬编码字符串。"""
     primary_key: str = "chunk_id"
     vector: str = "vector"
     sparse_vector: str = "sparse_vector"
@@ -17,6 +20,12 @@ class MilvusFields:
 
 
 class Settings(BaseSettings):
+    """应用配置对象。
+
+    说明:
+    - 通过 `HZ_RAG_` 前缀环境变量覆盖默认值。
+    - 这里是项目大多数行为的“总开关”。
+    """
     app_name: str = "hz-bank-rag"
     sqlite_path: str = "./rag_meta.db"
     data_dir: str = "./data"

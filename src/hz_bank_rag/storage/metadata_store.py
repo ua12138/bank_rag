@@ -5,9 +5,17 @@ import sqlite3
 from contextlib import contextmanager
 from typing import Any, Iterator
 
+# 元数据存储模块：使用 SQLite 管理知识库、文档、分块、bad case、会话记忆。
+
 
 class MetadataStore:
-    """SQLite metadata storage."""
+    """SQLite 元数据存储。
+
+    作用:
+    - 管理知识库/文档/分块
+    - 管理 bad case 与会话消息
+    - 提供 RAG 检索所需的查询接口
+    """
 
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path

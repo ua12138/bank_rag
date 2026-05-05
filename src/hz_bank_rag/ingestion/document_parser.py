@@ -4,6 +4,8 @@ import pathlib
 import re
 import zipfile
 
+# 文档解析模块：按后缀选择解析器，统一产出可入库文本。
+
 from hz_bank_rag.ingestion.multimodal import image_bytes_to_text, image_to_text
 
 
@@ -19,6 +21,7 @@ def _strip_xml_tags(text: str) -> str:
 
 
 def parse_document(file_path: str) -> str:
+    """统一解析入口：根据文件后缀分派到对应解析函数。"""
     path = pathlib.Path(file_path)
     suffix = path.suffix.lower()
 
