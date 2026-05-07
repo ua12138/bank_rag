@@ -65,6 +65,19 @@ class Settings(BaseSettings):
     query_cache_ttl_seconds: int = 300
     query_cache_max_size: int = 500
 
+    # L1: Embedding 缓存（文本→向量，永不失效）
+    enable_embedding_cache: bool = True
+    embedding_cache_max_size: int = 10000
+
+    # L2: 检索结果语义缓存
+    enable_retrieval_cache: bool = True
+    retrieval_cache_ttl_seconds: int = 180
+    retrieval_cache_max_size: int = 200
+    retrieval_cache_similarity_threshold: float = 0.92
+
+    # L3: 答案缓存语义匹配阈值
+    answer_cache_semantic_threshold: float = 0.95
+
     conversation_max_turns: int = 8
     conversation_max_chars: int = 3000
     conversation_summary_max_chars: int = 800

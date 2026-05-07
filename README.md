@@ -181,12 +181,51 @@ pytest -q
 - `MetadataStore`：bad-case 到 ragas 映射、会话清理
 - `MCP wrapper`：工具列表与 JSON-RPC 基础调用
 
-## 十二、当前已知问题
+## 十二、三层缓存与健康检查
+
+### 三层缓存架构
+
+系统采用三层分治缓存，逐层拦截以减少 API 调用和检索开销：
+
+| 层级 | 名称 | 匹配方式 | TTL | 作用 |
+|------|------|----------|-----|------|
+| L3 | AnswerCache | 精确 key + 语义相似度 | 300s | 命中直接返回答案，跳过一切下游 |
+| L2 | RetrievalCache | 语义 embedding 余弦相似度 | 180s | 命中跳过 embedding + 检索 + rerank |
+| L1 | EmbeddingCache | text MD5 hash | 永久 | 命中跳过 Embedding API 调用 |
+
+主动失效：文档入库/删除时，自动按 `kb_id` 失效 L2 和 L3 缓存。
+
+相关配置项（环境变量）：
+```powershell
+$env:HZ_RAG_ENABLE_EMBEDDING_CACHE="true"            # L1 开关
+$env:HZ_RAG_EMBEDDING_CACHE_MAX_SIZE="10000"          # L1 最大条目
+$env:HZ_RAG_ENABLE_RETRIEVAL_CACHE="true"             # L2 开关
+$env:HZ_RAG_RETRIEVAL_CACHE_TTL_SECONDS="180"         # L2 TTL
+$env:HZ_RAG_RETRIEVAL_CACHE_SIMILARITY_THRESHOLD="0.92"  # L2 相似度阈值
+$env:HZ_RAG_ENABLE_QUERY_CACHE="true"                 # L3 开关
+$env:HZ_RAG_ANSWER_CACHE_SEMANTIC_THRESHOLD="0.95"    # L3 语义阈值
+```
+
+### 健康检查
+
+`GET /health` 返回每个组件的实际运行探测结果：
+- SQLite：执行 `SELECT 1` 验证可读写
+- BM25：返回已索引知识库数量和 chunk 总数
+- Milvus：调用 `list_collections()` 做活性探测
+- SiliconFlow：检查 API Key 是否配置
+
+全部正常返回 `status: "ok"`，部分异常返回 `status: "degraded"`。
+
+### 对话上下文感知改写
+
+多轮对话中，QueryRewriter 会结合对话历史消解指代词（如"那个"、"它"），将隐含信息补充到改写结果中。
+
+## 十三、当前已知问题
 
 - `.pytest_tmp` 与 `data/pytest_tmp` 目录在你当前机器上可能有 ACL 拒绝访问。
 - 该问题属于系统权限，不是业务代码问题；不影响 API 与 MCP 服务正常运行。
 
-## 十三、RAG_PLUS（增强版）说明
+## 十四、RAG_PLUS（增强版）说明
 
 `RAG_PLUS/` 是独立增强目录，包含：
 
@@ -199,9 +238,9 @@ pytest -q
 
 详细架构见：`spec/RAG_PLUS_SPEC.md`
 
-## 十四、RAG_PLUS 启动步骤（详细）
+## 十五、RAG_PLUS 启动步骤（详细）
 
-### 12.1 安装依赖
+### 15.1 安装依赖
 
 ```powershell
 cd D:\code_warehouse\codex_learn\hz_bank_rag
@@ -210,7 +249,7 @@ pip install -e .
 pip install redis
 ```
 
-### 12.2 设置环境变量（最小集）
+### 15.2 设置环境变量（最小集）
 
 ```powershell
 $env:HZ_RAG_SILICONFLOW_BASE_URL="https://api.siliconflow.cn/v1"
@@ -226,7 +265,7 @@ $env:HZ_RAG_PLUS_REDIS_ENABLED="true"
 $env:HZ_RAG_PLUS_REDIS_URL="redis://127.0.0.1:6379/0"
 ```
 
-### 12.3 启动服务
+### 15.3 启动服务
 
 方式 1（脚本）：
 ```powershell
@@ -245,9 +284,9 @@ hz-rag-plus
 
 Swagger：`http://127.0.0.1:8092/docs`
 
-## 十五、RAG_PLUS 接口实操
+## 十六、RAG_PLUS 接口实操
 
-### 13.1 获取 Token
+### 16.1 获取 Token
 
 接口：`POST /plus/auth/token`
 
@@ -265,7 +304,7 @@ $tokenResp = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8092/plus/aut
 $token = $tokenResp.access_token
 ```
 
-### 13.2 导入 demo 数据
+### 16.2 导入 demo 数据
 
 接口：`POST /plus/demo/seed`（需要 `rag:admin`）
 
@@ -273,7 +312,7 @@ $token = $tokenResp.access_token
 Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8092/plus/demo/seed" -Headers @{ Authorization = "Bearer $token" }
 ```
 
-### 13.3 智能路由问答
+### 16.3 智能路由问答
 
 接口：`POST /plus/query`
 
@@ -295,7 +334,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8092/plus/demo/seed" -Head
 - `cache_hit`：是否命中缓存
 - `citations`：证据片段
 
-### 13.4 MCP 工具注册
+### 16.4 MCP 工具注册
 
 接口：`POST /plus/mcp/tools/register`
 
@@ -319,7 +358,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8092/plus/demo/seed" -Head
 }
 ```
 
-### 13.5 MCP 工具搜索
+### 16.5 MCP 工具搜索
 
 接口：`POST /plus/mcp/tools/search`
 
@@ -331,7 +370,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8092/plus/demo/seed" -Head
 }
 ```
 
-### 13.6 混合意图工作流
+### 16.6 混合意图工作流
 
 接口：`POST /plus/workflow/run`
 
@@ -353,7 +392,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8092/plus/demo/seed" -Head
 - `tools`：匹配到的工具
 - `report`：聚合报告
 
-## 十六、RAG_PLUS 常见问题排查
+## 十七、RAG_PLUS 常见问题排查
 
 1. `/plus/auth/token` 返回 401
 - 检查 `HZ_RAG_PLUS_ADMIN_USERNAME/HZ_RAG_PLUS_ADMIN_PASSWORD` 是否与请求一致。

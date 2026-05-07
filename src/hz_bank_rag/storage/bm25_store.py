@@ -14,6 +14,15 @@ class BM25Store:
         self._chunk_ids: dict[str, list[str]] = {}
         self._texts: dict[str, list[str]] = {}
 
+    def health(self) -> dict:
+        """返回各知识库的 BM25 索引状态。"""
+        return {
+            "status": "ok",
+            "backend": "memory",
+            "indexed_kbs": len(self._indexes),
+            "total_chunks": sum(len(idx) for idx in self._indexes.values()),
+        }
+
     def rebuild(self, kb_id: str, chunk_map: dict[str, str]) -> None:
         """重建某个知识库的 BM25 索引。"""
         chunk_ids = list(chunk_map.keys())

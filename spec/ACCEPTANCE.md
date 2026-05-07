@@ -23,9 +23,32 @@ $env:HZ_RAG_MILVUS_URI="http://47.111.101.201:19530"
 ```powershell
 uvicorn hz_bank_rag.api.main:app --reload --port 8090
 ```
-2. `GET /health` 期望 200
+2. `GET /health` 期望 200，且返回组件级探测结果
 3. `POST /demo/seed` 期望 `count >= 1`
 4. `POST /query` 期望返回 `answer` 与 `citations`
+
+### 3.1 Health 接口验收（新增）
+
+`GET /health` 返回格式：
+```json
+{
+  "status": "ok",
+  "components": {
+    "metadata_store": {"status": "ok", "backend": "sqlite", "path": "..."},
+    "bm25_store": {"status": "ok", "backend": "memory", "indexed_kbs": 1, "total_chunks": 42},
+    "vector_store": {"status": "ok", "provider": "MilvusVectorStore", ...},
+    "llm_client": {"status": "ok", "base_url": "...", "key_configured": true}
+  },
+  "app": "...",
+  ...
+}
+```
+
+验收要点：
+- 每个 component 都有 `status` 字段（`ok` / `error` / `degraded` / `no_key`）
+- 全部 ok 时顶层 `status` 为 `"ok"`，否则为 `"degraded"`
+- Milvus 探测会实际调用 `list_collections()` 做活性检查
+- SQLite 探测会执行 `SELECT 1` 验证可读写
 
 ## 4. 入库版本化与去重验收（新增）
 
@@ -108,6 +131,43 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/knowledge-bases/hz-ba
 - 若 `retrieval_scope` 无效：确认请求体字段名拼写正确
 - 若新鲜度无明显变化：检查文档 `effective_at` 是否有差异
 - 若去重未生效：检查 chunk 元数据是否包含 `doc_family_id`
+
+## 5.1 三层缓存验收（新增）
+
+### L1 EmbeddingCache 验证
+
+1. 同一个问题问两次，观察响应时间
+2. 第二次应显著更快（跳过 Embedding API 调用，省 ~200-800ms）
+
+### L2 RetrievalCache 语义缓存验证
+
+1. 问语义相似的两个问题：
+```powershell
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/query" -ContentType "application/json" -Body '{"kb_id":"hz-bank-demo","query":"数据库连接池超时怎么办","top_k":5}'
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/query" -ContentType "application/json" -Body '{"kb_id":"hz-bank-demo","query":"DB连接池超时如何处理","top_k":5}'
+```
+2. 第二次应命中 L2 语义缓存，跳过检索流程，响应更快
+
+### L3 AnswerCache 语义缓存验证
+
+1. 问语义相似的问题，观察 `cache_hit` 字段
+2. 语义相似（余弦相似度 >= 0.95）时应命中 L3 缓存，`cache_hit=true`
+
+### 主动失效验证
+
+1. 先问一个问题，缓存答案
+2. 入库一个新文档（触发 `on_kb_change` 回调）
+3. 再问同样的问题
+4. 预期：不应命中缓存（已主动失效），应返回包含新文档的结果
+
+### 缓存配置验证
+
+环境变量控制各层开关：
+```powershell
+$env:HZ_RAG_ENABLE_EMBEDDING_CACHE="true"    # L1 开关
+$env:HZ_RAG_ENABLE_RETRIEVAL_CACHE="true"    # L2 开关
+$env:HZ_RAG_ENABLE_QUERY_CACHE="true"        # L3 开关
+```
 
 ## 6. bad-case 与评估验收
 

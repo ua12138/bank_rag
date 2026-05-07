@@ -18,8 +18,8 @@ class QueryRewriter:
         self.client = SiliconFlowClient()
         self.model = model or settings.siliconflow_chat_model
 
-    def rewrite(self, query: str) -> str:
-        """执行改写。"""
+    def rewrite(self, query: str, memory_context: str = "") -> str:
+        """执行改写。当提供对话历史时，结合上下文消解代词和指代。"""
         normalized = query.strip()
         if not normalized:
             return normalized
@@ -27,9 +27,18 @@ class QueryRewriter:
         system_prompt = (
             "你是银行运维知识库的查询改写器。"
             "请把用户问题改写为简洁、可检索、包含关键术语的中文检索查询。"
+            "如果提供了对话历史，请结合上下文消解代词和指代（如'那个'、'它'），"
+            "将隐含信息补充到改写结果中。"
             "仅输出改写结果，不要解释。"
         )
-        user_prompt = f"原始问题：{normalized}\n请输出改写后的检索查询："
+        if memory_context:
+            user_prompt = (
+                f"对话历史：\n{memory_context}\n"
+                f"原始问题：{normalized}\n"
+                f"请输出改写后的检索查询："
+            )
+        else:
+            user_prompt = f"原始问题：{normalized}\n请输出改写后的检索查询："
 
         try:
             rewritten = self.client.chat(

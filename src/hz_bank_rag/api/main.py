@@ -17,6 +17,7 @@ from hz_bank_rag.api.schemas import (
     RagasBuildRequest,
 )
 from hz_bank_rag.core.config import settings
+from hz_bank_rag.core.siliconflow_client import SiliconFlowClient
 from hz_bank_rag.evaluation.ragas_runner import RagasRunner
 from hz_bank_rag.retrieval.hybrid_retriever import HybridRetriever
 from hz_bank_rag.retrieval.query_rewrite import QueryRewriter
@@ -29,7 +30,7 @@ from hz_bank_rag.storage.vector_store import InMemoryVectorStore, MilvusVectorSt
 
 
 def build_app() -> FastAPI:
-    # 应用装配入口：这里把“存储层 + 检索层 + 服务层 + HTTP 路由”一次性连接起来。
+    # 应用装配入口：这里把"存储层 + 检索层 + 服务层 + HTTP 路由"一次性连接起来。
     app = FastAPI(
         title="HZ Bank Production RAG",
         version="0.5.0",
@@ -54,13 +55,11 @@ def build_app() -> FastAPI:
         else InMemoryVectorStore(settings.vector_dim)
     )
 
-    # 4) 仓储层：统一封装“文档入库、切分、索引重建、删除”等能力。
-    repo = RAGRepository(metadata=meta, vector_store=vector_store, bm25=bm25)
     # 5) 检索层：把 BM25 + 向量检索融合。
     retriever = HybridRetriever(bm25_store=bm25, vector_store=vector_store)
     # 6) 问答服务层：把改写、检索、重排、生成答案组织成一条流水线。
     qa_service = QAService(
-        repo=repo,
+        repo=None,  # 占位，下面创建 repo 后再赋值
         retriever=retriever,
         rewriter=QueryRewriter(),
         reranker=SiliconFlowReranker(),
@@ -68,22 +67,38 @@ def build_app() -> FastAPI:
     )
     ragas_runner = RagasRunner()
 
+    # 缓存失效回调：文档入库/删除时，按 kb_id 失效 L2 检索缓存和 L3 答案缓存。
+    def _invalidate_caches(changed_kb_id: str) -> None:
+        if qa_service.retrieval_cache is not None:
+            qa_service.retrieval_cache.invalidate_kb(changed_kb_id)
+        if qa_service.cache is not None:
+            qa_service.cache.invalidate_kb(changed_kb_id)
+
+    # 4) 仓储层：统一封装"文档入库、切分、索引重建、删除"等能力。
+    repo = RAGRepository(metadata=meta, vector_store=vector_store, bm25=bm25, on_kb_change=_invalidate_caches)
+    qa_service.repo = repo
+
     @app.get("/health")
     def health() -> dict:
-        # 健康检查：除了存活状态，还返回关键配置，便于排查“为什么效果不对/服务不可用”。
+        # 健康检查：逐组件探测运行状态，并返回关键配置。
+        component_health = {
+            "metadata_store": meta.health(),
+            "bm25_store": bm25.health(),
+            "vector_store": vector_store.health(),
+            "llm_client": SiliconFlowClient().health(),
+        }
+        all_ok = all(c.get("status") == "ok" for c in component_health.values())
         return {
-            "status": "ok",
+            "status": "ok" if all_ok else "degraded",
+            "components": component_health,
             "app": settings.app_name,
             "use_milvus": settings.use_milvus,
             "milvus_uri": settings.milvus_uri,
-            "vector_store": vector_store.__class__.__name__,
-            "milvus_available": getattr(vector_store, "available", False),
             "siliconflow_base_url": settings.siliconflow_base_url,
             "siliconflow_chat_model": settings.siliconflow_chat_model,
             "siliconflow_embedding_model": settings.siliconflow_embedding_model,
             "siliconflow_rerank_model": settings.siliconflow_rerank_model,
             "siliconflow_vision_model": settings.siliconflow_vision_model,
-            "siliconflow_key_configured": bool(settings.siliconflow_api_key),
             "query_cache": {
                 "enabled": settings.enable_query_cache,
                 "ttl_seconds": settings.query_cache_ttl_seconds,

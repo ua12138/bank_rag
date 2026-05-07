@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import sqlite3
@@ -29,6 +29,15 @@ class MetadataStore:
             conn.commit()
         finally:
             conn.close()
+
+    def health(self) -> dict:
+        """验证 SQLite 数据库可读写。"""
+        try:
+            with self._conn() as conn:
+                conn.execute("SELECT 1")
+            return {"status": "ok", "backend": "sqlite", "path": self.db_path}
+        except Exception as exc:
+            return {"status": "error", "backend": "sqlite", "detail": str(exc)}
 
     def _init_schema(self) -> None:
         with self._conn() as conn:

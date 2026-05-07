@@ -25,23 +25,25 @@
 - 数据结构变化：原始字典字段补全默认值
 - 异常/兜底：Pydantic 校验失败会由 FastAPI 返回 422
 
-## Step 3 / 10：`QAService.ask` 入口与 cache key 生成
+## Step 3 / 10：`QAService.ask` 入口、记忆构建与 cache key 生成
 - 文件路径：`src/hz_bank_rag/service/qa_service.py`
-- 类名/函数名：`QAService.ask(...)`, `_make_cache_key(...)`
-- 调用关系：`api.query -> QAService.ask -> _make_cache_key`
+- 类名/函数名：`QAService.ask(...)`, `_build_memory_context(...)`, `_make_cache_key(...)`
+- 调用关系：`api.query -> QAService.ask -> _build_memory_context -> _make_cache_key`
 - 核心入参：`kb_id/query/top_k/candidate_multiplier/fast_mode/session_id/use_memory`
-- 核心出参：`cache_key: str`
-- 数据结构变化：结构化参数 -> 单字符串 key
+- 核心出参：`cache_key: str`, `memory_context: str`, `memory_meta: dict`
+- 数据结构变化：结构化参数 -> 单字符串 key；会话消息列表 -> 拼接记忆文本
+- 关键变更：`_build_memory_context()` 现在先于 `rewrite()` 执行，以便将对话历史传入改写器消解指代词
 - 异常/兜底：无异常分支；继续下一步
 
-## Step 4 / 10：缓存读取分支
-- 文件路径：`src/hz_bank_rag/service/qa_service.py`, `src/hz_bank_rag/service/query_cache.py`
-- 类名/函数名：`QAService.ask`, `QueryCache.get`
-- 调用关系：`QAService.ask -> QueryCache.get`
-- 核心入参：`cache_key`
-- 核心出参：`cached: dict | None`
-- 数据结构变化：缓存命中则 `cached` 深拷贝后追加 `cache_hit/latency/cache_stats`
-- 异常/兜底：过期或未命中返回 `None`，继续检索链路
+## Step 4 / 10：三层缓存读取分支
+- 文件路径：`src/hz_bank_rag/service/qa_service.py`, `src/hz_bank_rag/service/query_cache.py`, `src/hz_bank_rag/service/retrieval_cache.py`, `src/hz_bank_rag/service/embedding_cache.py`
+- 类名/函数名：`QAService.ask`, `QueryCache.get`（L3）, `RetrievalCache.get`（L2）, `EmbeddingCache.get`（L1）
+- 调用关系：`QAService.ask -> L3 AnswerCache.get -> L2 RetrievalCache.get -> L1 EmbeddingCache.get`
+- 核心入参：`cache_key`, `query_embedding`, `kb_id`, `params_hash`
+- 核心出参：`cached: dict | None`（L3 命中直接返回答案；L2 命中返回检索结果跳过检索；L1 命中跳过 Embedding API）
+- 数据结构变化：L3 命中则 `cached` 深拷贝后追加 `cache_hit/latency/cache_stats`；L2 命中跳过检索直接进入生成
+- 主动失效：文档入库/删除时通过 `on_kb_change` 回调按 `kb_id` 失效 L2 和 L3 缓存
+- 异常/兜底：过期或未命中返回 `None`，继续下一层缓存或检索链路
 
 ## Step 5 / 10：获取 KB chunk 映射
 - 文件路径：`src/hz_bank_rag/service/qa_service.py`, `src/hz_bank_rag/storage/rag_repository.py`, `src/hz_bank_rag/storage/metadata_store.py`
@@ -52,13 +54,15 @@
 - 数据结构变化：`SQLite rows -> list[dict] -> dict映射`
 - 异常/兜底：若 `chunk_map` 为空，直接返回固定答复“Knowledge base is empty...”
 
-## Step 6 / 10：混合检索（稀疏+稠密）
-- 文件路径：`src/hz_bank_rag/service/qa_service.py`, `src/hz_bank_rag/retrieval/hybrid_retriever.py`, `src/hz_bank_rag/storage/vector_store.py`, `src/hz_bank_rag/storage/bm25_store.py`
-- 类名/函数名：`QAService._retrieve_hits`, `HybridRetriever.search`, `MilvusVectorStore.search/search_sparse`, `BM25Store.search`
+## Step 6 / 10：混合检索（稀疏+稠密）+ L2 语义缓存
+- 文件路径：`src/hz_bank_rag/service/qa_service.py`, `src/hz_bank_rag/retrieval/hybrid_retriever.py`, `src/hz_bank_rag/storage/vector_store.py`, `src/hz_bank_rag/storage/bm25_store.py`, `src/hz_bank_rag/service/retrieval_cache.py`
+- 类名/函数名：`QAService._retrieve_hits`, `RetrievalCache.get/set`, `HybridRetriever.search`, `MilvusVectorStore.search/search_sparse`, `BM25Store.search`
 - 调用关系：
-  - `QAService._retrieve_hits -> HybridRetriever.search`
+  - `QAService._retrieve_hits -> RetrievalCache.get`（L2 命中则跳过检索）
+  - `QAService._retrieve_hits -> HybridRetriever.search`（L2 未命中时执行）
   - `HybridRetriever.search -> (vector_store.search_sparse OR bm25_store.search) + vector_store.search`
-- 核心入参：`kb_id`, `rewritten query`, `top_k`, `candidate_multiplier`, `kb_chunk_map`
+  - `QAService._retrieve_hits -> RetrievalCache.set`（检索完成后写入 L2）
+- 核心入参：`kb_id`, `rewritten query`, `top_k`, `candidate_multiplier`, `kb_chunk_map`, `query_embedding`
 - 核心出参：`hits: list[RetrievalHit]`
 - 数据结构变化：
   - `query -> sparse_hits/dense_hits (tuple列表)`
@@ -66,6 +70,7 @@
 - 异常/兜底：
   - Milvus sparse 异常时 `search_sparse` 返回空并降级（日志警告）
   - dense 检索可回退本地内存向量命中（`local_hits`）
+  - L2 缓存异常时静默跳过，不影响主链路
 
 ## Step 7 / 10：可选重排分支
 - 文件路径：`src/hz_bank_rag/service/qa_service.py`, `src/hz_bank_rag/retrieval/reranker.py`, `src/hz_bank_rag/core/siliconflow_client.py`
@@ -148,7 +153,7 @@
 | `citations` | `QAService._citation_from_hit` | `list[RetrievalHit]` |
 | `memory` | `QAService._build_memory_context` | `conversation_messages` 表 |
 | `latency_ms` | `QAService.ask` | `time.perf_counter()` 差值 |
-| `cache_hit/cache_stats` | `QAService.ask` | `QueryCache.get/set/stats` |
+| `cache_hit/cache_stats` | `QAService.ask` | `QueryCache.get/set/stats`（L3 AnswerCache） |
 
 ---
 
@@ -157,11 +162,14 @@
 | 条件 | 分支逻辑 | 触发函数 | 结果 |
 |---|---|---|---|
 | `fast_mode=True` | 不执行 rewrite，不执行 rerank，仅截取 hits[:top_k] | `QAService.ask` + `_retrieve_hits` | 延迟更低，排序只基于 hybrid |
-| `fast_mode=False` | 执行 `rewriter.rewrite` + `reranker.rerank` | `QueryRewriter.rewrite`, `SiliconFlowReranker.rerank` | 召回对齐更强，延迟更高 |
-| 缓存命中 | 直接返回缓存结果并补充 `cache_hit=True` | `QueryCache.get` | 跳过检索/生成主链路 |
-| 缓存未命中 | 继续走检索+生成全链路 | `QAService.ask` | 生成新答案并写回缓存 |
+| `fast_mode=False` | 执行 `rewriter.rewrite(memory_context)` + `reranker.rerank` | `QueryRewriter.rewrite`, `SiliconFlowReranker.rerank` | 召回对齐更强，延迟更高 |
+| L3 缓存命中 | 直接返回缓存结果并补充 `cache_hit=True` | `QueryCache.get` | 跳过检索/生成主链路 |
+| L2 缓存命中 | 复用检索结果，跳过 embedding + 检索 + rerank | `RetrievalCache.get` | 直接进入 LLM 生成 |
+| L1 缓存命中 | 跳过 Embedding API 调用 | `EmbeddingCache.get` | 省 ~200-800ms |
+| 三层均未命中 | 走检索+生成全链路，写入 L1/L2/L3 缓存 | `QAService.ask` | 生成新答案并写回缓存 |
+| 文档入库/删除 | 通过 `on_kb_change` 回调按 `kb_id` 失效 L2/L3 缓存 | `RAGRepository.ingest_document/delete_document/delete_kb` | 缓存主动失效 |
 | KB 为空 | 直接返回固定提示文案 | `QAService.ask` | 无 citations |
-| 模型调用失败 | 返回“Model call failed + snippets” | `QAService._generate_answer` | 服务可用但降级回答 |
+| 模型调用失败 | 返回”Model call failed + snippets” | `QAService._generate_answer` | 服务可用但降级回答 |
 
 ---
 
@@ -171,18 +179,24 @@
 POST /query
   -> src/hz_bank_rag/api/main.py::query(QueryRequest)
   -> src/hz_bank_rag/service/qa_service.py::QAService.ask
+      -> _build_memory_context                        # 先构建对话记忆
+          -> MetadataStore.get_conversation_messages [SQLite SELECT]
       -> _make_cache_key
-      -> QueryCache.get (optional)
+      -> QueryCache.get (L3, optional)                # 精确+语义双模式
+      -> SiliconFlowEmbedder.encode (查询向量化)       # L1 EmbeddingCache 命中则跳过 API
+          -> EmbeddingCache.get (L1)
+          -> SiliconFlowClient.embeddings [External API] (仅未命中)
       -> RAGRepository.get_kb_chunk_map
           -> MetadataStore.get_kb_chunks [SQLite SELECT]
       -> QAService._retrieve_hits
-          -> HybridRetriever.search
+          -> RetrievalCache.get (L2, 语义相似度匹配)   # 命中则跳过检索
+          -> HybridRetriever.search                    # L2 未命中时执行
               -> MilvusVectorStore.search_sparse OR BM25Store.search
               -> MilvusVectorStore.search
               -> _rrf + _normalize_scores
           -> SiliconFlowReranker.rerank (if fast_mode=False)
-      -> QAService._build_memory_context
-          -> MetadataStore.get_conversation_messages [SQLite SELECT]
+          -> RetrievalCache.set (L2, 写入缓存)
+      -> QueryRewriter.rewrite(query, memory_context)  # 非 fast_mode，传入对话上下文
       -> QAService._build_messages
       -> QAService._generate_answer
           -> SiliconFlowClient.chat [External API]
@@ -190,7 +204,7 @@ POST /query
           -> MetadataStore.add_conversation_message [SQLite INSERT]
           -> MetadataStore.delete_conversation_messages_before [SQLite DELETE]
       -> QAService._citation_from_hit
-      -> QueryCache.set (optional)
+      -> QueryCache.set (L3, optional, 写入缓存)
   -> HTTP 200 JSON
 ```
 

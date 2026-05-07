@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import copy
 import json
@@ -8,10 +8,12 @@ from collections.abc import Iterator
 
 from hz_bank_rag.core.config import settings
 from hz_bank_rag.core.siliconflow_client import SiliconFlowClient, SiliconFlowError
+from hz_bank_rag.retrieval.embedding import SiliconFlowEmbedder
 from hz_bank_rag.retrieval.hybrid_retriever import HybridRetriever
 from hz_bank_rag.retrieval.query_rewrite import QueryRewriter
 from hz_bank_rag.retrieval.reranker import SiliconFlowReranker
 from hz_bank_rag.service.query_cache import QueryCache
+from hz_bank_rag.service.retrieval_cache import RetrievalCache
 from hz_bank_rag.storage.metadata_store import MetadataStore
 from hz_bank_rag.storage.rag_repository import RAGRepository
 
@@ -33,9 +35,19 @@ class QAService:
         self.reranker = reranker
         self.meta = meta
         self.llm_client = SiliconFlowClient()
+        self.embedder = SiliconFlowEmbedder()
         self.cache = (
             QueryCache(ttl_seconds=settings.query_cache_ttl_seconds, max_size=settings.query_cache_max_size)
             if settings.enable_query_cache
+            else None
+        )
+        self.retrieval_cache = (
+            RetrievalCache(
+                ttl_seconds=settings.retrieval_cache_ttl_seconds,
+                max_size=settings.retrieval_cache_max_size,
+                similarity_threshold=settings.retrieval_cache_similarity_threshold,
+            )
+            if settings.enable_retrieval_cache
             else None
         )
 
@@ -58,7 +70,9 @@ class QAService:
         # 3) 检索命中文档块 4) 组装上下文并调用大模型生成答案
         # 5) 保存会话记忆 6) 写入缓存
         start = time.perf_counter()
-        rewritten = query if fast_mode else self.rewriter.rewrite(query)
+        # 先构建对话记忆，再改写（改写时可结合上下文消解代词）
+        memory_context, memory_meta = self._build_memory_context(kb_id=kb_id, session_id=session_id, use_memory=use_memory)
+        rewritten = query if fast_mode else self.rewriter.rewrite(query, memory_context=memory_context)
         final_scope = retrieval_scope or settings.default_retrieval_scope
         final_freshness = settings.default_freshness_weight if freshness_weight is None else float(freshness_weight)
         final_dedup = settings.default_dedup_by_family if dedup_by_family is None else bool(dedup_by_family)
@@ -76,9 +90,16 @@ class QAService:
             dedup_by_family=final_dedup,
         )
 
+        # 预计算 query embedding（L2/L3 语义缓存都需要）
+        query_embedding = None
+        if self.retrieval_cache is not None or (self.cache is not None and self.cache.semantic_threshold < 1.0):
+            query_vec = self.embedder.encode([rewritten])
+            if query_vec.size > 0:
+                query_embedding = query_vec[0]
+
         if self.cache is not None and not refresh_cache:
             # 命中缓存：省去检索和大模型调用，显著降低延迟与成本。
-            cached = self.cache.get(cache_key)
+            cached = self.cache.get(cache_key, query_embedding=query_embedding)
             if cached is not None:
                 result = copy.deepcopy(cached)
                 result["cache_hit"] = True
@@ -112,7 +133,6 @@ class QAService:
             dedup_by_family=final_dedup,
         )
 
-        memory_context, memory_meta = self._build_memory_context(kb_id=kb_id, session_id=session_id, use_memory=use_memory)
         answer = self._generate_answer(query=query, rewritten=rewritten, hits=hits, memory_context=memory_context)
 
         if session_id and use_memory:
@@ -135,7 +155,7 @@ class QAService:
         }
 
         if self.cache is not None:
-            self.cache.set(cache_key, copy.deepcopy(result))
+            self.cache.set(cache_key, copy.deepcopy(result), query_embedding=query_embedding, kb_id=kb_id)
             result["cache_stats"] = self.cache.stats()
         return result
 
@@ -153,7 +173,8 @@ class QAService:
         dedup_by_family: bool | None = None,
     ) -> tuple[dict, Iterator[str]]:
         # 与 ask 逻辑基本一致，差异在于返回 token 迭代器，供 SSE 流式输出。
-        rewritten = query if fast_mode else self.rewriter.rewrite(query)
+        memory_context, memory_meta = self._build_memory_context(kb_id=kb_id, session_id=session_id, use_memory=use_memory)
+        rewritten = query if fast_mode else self.rewriter.rewrite(query, memory_context=memory_context)
         final_scope = retrieval_scope or settings.default_retrieval_scope
         final_freshness = settings.default_freshness_weight if freshness_weight is None else float(freshness_weight)
         final_dedup = settings.default_dedup_by_family if dedup_by_family is None else bool(dedup_by_family)
@@ -188,8 +209,6 @@ class QAService:
             freshness_weight=final_freshness,
             dedup_by_family=final_dedup,
         )
-        memory_context, memory_meta = self._build_memory_context(kb_id=kb_id, session_id=session_id, use_memory=use_memory)
-
         meta = {
             "kb_id": kb_id,
             "query": query,
@@ -260,6 +279,13 @@ class QAService:
             "top_hits": [self._citation_from_hit(hit) for hit in hits],
         }
 
+    @staticmethod
+    def _make_retrieval_params_hash(
+        top_k: int, candidate_multiplier: int, fast_mode: bool,
+        retrieval_scope: str, freshness_weight: float, dedup_by_family: bool,
+    ) -> str:
+        return f"{top_k}|{candidate_multiplier}|{int(fast_mode)}|{retrieval_scope}|{freshness_weight:.4f}|{int(dedup_by_family)}"
+
     def _retrieve_hits(
         self,
         kb_id: str,
@@ -273,6 +299,20 @@ class QAService:
         freshness_weight: float,
         dedup_by_family: bool,
     ):
+        # L2 语义缓存：语义相近的 query 直接复用检索结果
+        if self.retrieval_cache is not None:
+            query_vec = self.embedder.encode([rewritten])
+            if query_vec.size > 0:
+                params_hash = self._make_retrieval_params_hash(
+                    top_k, candidate_multiplier, fast_mode, retrieval_scope, freshness_weight, dedup_by_family,
+                )
+                cached_hits = self.retrieval_cache.get(query_vec[0], kb_id, params_hash)
+                if cached_hits is not None:
+                    return cached_hits
+        else:
+            query_vec = None
+            params_hash = None
+
         # 检索流水线：
         # 关键词过滤（可选） -> 混合检索 -> 轻关键词加分 -> 重排 -> 新鲜度+去重
         active_chunk_map, keyword_meta = self._apply_keyword_layer(query=rewritten, chunk_map=chunk_map)
@@ -296,6 +336,11 @@ class QAService:
             freshness_weight=freshness_weight,
             retrieval_scope=retrieval_scope,
         )
+
+        # 写入 L2 缓存
+        if self.retrieval_cache is not None and query_vec is not None and query_vec.size > 0:
+            self.retrieval_cache.set(query_vec[0], kb_id, params_hash, hits)
+
         return hits
 
     @staticmethod

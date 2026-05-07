@@ -37,6 +37,10 @@ class BaseVectorStore(ABC):
         self.dim = dim
         self.embedder = SiliconFlowEmbedder()
 
+    def health(self) -> dict:
+        """返回向量存储的健康状态。子类可覆盖以提供更详细信息。"""
+        return {"status": "ok", "provider": self.__class__.__name__, "dim": self.dim}
+
     @abstractmethod
     def upsert(self, kb_id: str, chunk_ids: list[str], texts: list[str], doc_ids: list[str]) -> None:
         raise NotImplementedError
@@ -79,6 +83,15 @@ class InMemoryVectorStore(BaseVectorStore):
         super().__init__(dim=dim)
         self._vectors: dict[str, np.ndarray] = {}
         self._chunk_to_kb: dict[str, str] = {}
+
+    def health(self) -> dict:
+        """返回内存向量库状态。"""
+        return {
+            "status": "ok",
+            "provider": "InMemoryVectorStore",
+            "dim": self.dim,
+            "stored_vectors": len(self._vectors),
+        }
 
     def upsert(self, kb_id: str, chunk_ids: list[str], texts: list[str], doc_ids: list[str]) -> None:
         vectors = self.embedder.encode(texts)
@@ -314,6 +327,27 @@ class MilvusVectorStore(BaseVectorStore):
             self.collection_name,
         )
         self._ensure_collection()
+
+    def health(self) -> dict:
+        """运行时探测 Milvus 连接状态。"""
+        probe_ok = False
+        if self.available and self.client is not None:
+            try:
+                self.client.list_collections()
+                probe_ok = True
+            except Exception:
+                self.available = False
+                probe_ok = False
+        status = "ok" if probe_ok else ("degraded" if self._fallback else "error")
+        return {
+            "status": status,
+            "provider": "MilvusVectorStore",
+            "dim": self.dim,
+            "milvus_available": self.available,
+            "sparse_available": self.sparse_available,
+            "collection": self.collection_name,
+            "fallback_vectors": len(self._fallback._vectors),
+        }
 
     def upsert(self, kb_id: str, chunk_ids: list[str], texts: list[str], doc_ids: list[str]) -> None:
         self._fallback.upsert(kb_id=kb_id, chunk_ids=chunk_ids, texts=texts, doc_ids=doc_ids)

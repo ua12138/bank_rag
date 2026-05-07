@@ -43,14 +43,22 @@ def build_runtime() -> Runtime:
         if settings.use_milvus
         else InMemoryVectorStore(settings.vector_dim)
     )
-    repo = RAGRepository(metadata=meta, vector_store=vector_store, bm25=bm25)
     retriever = HybridRetriever(bm25_store=bm25, vector_store=vector_store)
     qa = QAService(
-        repo=repo,
+        repo=None,
         retriever=retriever,
         rewriter=QueryRewriter(),
         reranker=SiliconFlowReranker(),
         meta=meta,
     )
     ragas = RagasRunner()
+
+    def _invalidate_caches(changed_kb_id: str) -> None:
+        if qa.retrieval_cache is not None:
+            qa.retrieval_cache.invalidate_kb(changed_kb_id)
+        if qa.cache is not None:
+            qa.cache.invalidate_kb(changed_kb_id)
+
+    repo = RAGRepository(metadata=meta, vector_store=vector_store, bm25=bm25, on_kb_change=_invalidate_caches)
+    qa.repo = repo
     return Runtime(meta=meta, repo=repo, qa=qa, ragas=ragas, vector_store=vector_store)

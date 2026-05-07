@@ -4,6 +4,7 @@ import hashlib
 import json
 import pathlib
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 from hz_bank_rag.core.config import settings
@@ -23,11 +24,18 @@ class DuplicateDocumentError(RuntimeError):
 class RAGRepository:
     """RAG 仓储层：负责文档入库、分块、索引维护、版本管理。"""
 
-    def __init__(self, metadata: MetadataStore, vector_store: BaseVectorStore, bm25: BM25Store) -> None:
+    def __init__(
+        self,
+        metadata: MetadataStore,
+        vector_store: BaseVectorStore,
+        bm25: BM25Store,
+        on_kb_change: Callable[[str], None] | None = None,
+    ) -> None:
         self.metadata = metadata
         self.vector_store = vector_store
         self.bm25 = bm25
         self.chunker = Chunker(chunk_size=settings.chunk_size, overlap=settings.chunk_overlap)
+        self._on_kb_change = on_kb_change
         self.bootstrap_indexes()
 
     def bootstrap_indexes(self) -> None:
@@ -140,6 +148,8 @@ class RAGRepository:
         self.vector_store.upsert(kb_id=kb_id, chunk_ids=chunk_ids, texts=chunks, doc_ids=doc_ids)
         # BM25 当前实现按知识库整体重建，保证与最新 chunk 集合一致。
         self._rebuild_bm25(kb_id)
+        if self._on_kb_change:
+            self._on_kb_change(kb_id)
         return {
             "kb_id": kb_id,
             "doc_id": doc_id,
@@ -201,6 +211,8 @@ class RAGRepository:
                 doc_family_id=doc.get("doc_family_id", ""),
             )
         self._rebuild_bm25(kb_id)
+        if self._on_kb_change:
+            self._on_kb_change(kb_id)
         return {
             "kb_id": kb_id,
             "doc_id": doc_id,
@@ -216,6 +228,8 @@ class RAGRepository:
         self.vector_store.delete_chunks(chunk_ids)
         self.metadata.delete_kb(kb_id)
         self.bm25.clear(kb_id)
+        if self._on_kb_change:
+            self._on_kb_change(kb_id)
         return {"kb_id": kb_id, "deleted_chunks": len(chunk_ids)}
 
     def get_kb_chunk_map(self, kb_id: str, retrieval_scope: str = "active_only") -> dict[str, dict]:

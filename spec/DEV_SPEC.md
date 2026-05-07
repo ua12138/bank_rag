@@ -32,7 +32,14 @@
 
 ### 3.2 查询链路
 
-`/query` 或 `/query/stream` ->（可选 Rewrite）-> BM25 + Vector 并行召回 -> RRF 融合 ->（非 fast_mode 时 Rerank）-> LLM 生成。
+`/query` 或 `/query/stream` -> 三层缓存检查 ->（可选 Rewrite，支持对话上下文）-> BM25 + Vector 并行召回 -> RRF 融合 ->（非 fast_mode 时 Rerank）-> LLM 生成。
+
+缓存架构（三层分治）：
+- L1 EmbeddingCache：文本→向量缓存，key 为文本 MD5，永久有效
+- L2 RetrievalCache：检索结果语义缓存，用 embedding 余弦相似度匹配，TTL 180s
+- L3 AnswerCache：答案缓存，精确 key + 语义相似度双模式，TTL 300s
+
+主动失效：文档入库/删除时，通过 `on_kb_change` 回调按 `kb_id` 失效 L2 和 L3 缓存。
 
 稀疏召回来源：
 - 优先：Milvus 稀疏 BM25（持久化）
@@ -40,6 +47,9 @@
 
 代码入口：
 - `src/hz_bank_rag/service/qa_service.py`
+- `src/hz_bank_rag/service/embedding_cache.py`（L1）
+- `src/hz_bank_rag/service/retrieval_cache.py`（L2）
+- `src/hz_bank_rag/service/query_cache.py`（L3）
 - `src/hz_bank_rag/retrieval/hybrid_retriever.py`
 - `src/hz_bank_rag/retrieval/reranker.py`
 
@@ -128,25 +138,115 @@
   - `context_recall`：召回上下文是否覆盖 ground truth 关键事实
 - 代码：`src/hz_bank_rag/evaluation/ragas_runner.py`
 
+### 4.8+ Health 接口如何真正检测组件状态
+
+- `GET /health` 返回每个组件的实际运行探测结果，而非仅返回配置。
+- 组件级探测：
+  - `MetadataStore.health()`：执行 `SELECT 1` 验证 SQLite 可读写
+  - `BM25Store.health()`：返回已索引知识库数量和 chunk 总数
+  - `MilvusVectorStore.health()`：调用 `client.list_collections()` 做活性探测，更新 `self.available`
+  - `InMemoryVectorStore.health()`：返回已存储向量数量
+  - `SiliconFlowClient.health()`：检查 API Key 是否配置
+- 返回格式：`status` 为 `"ok"`（全部正常）或 `"degraded"`（部分异常），每个组件有独立 `status`
+- 代码：
+  - `src/hz_bank_rag/api/main.py`（`/health` 路由）
+  - `src/hz_bank_rag/storage/metadata_store.py`（`health()` 方法）
+  - `src/hz_bank_rag/storage/bm25_store.py`（`health()` 方法）
+  - `src/hz_bank_rag/storage/vector_store.py`（`health()` 方法）
+  - `src/hz_bank_rag/core/siliconflow_client.py`（`health()` 方法）
+
+### 4.8++ QueryRewriter 如何利用对话上下文消解指代
+
+- 问题：多轮对话中用户常使用"那个"、"它"等指代词，原始 rewrite 仅看当前 query，丢失语义。
+- 方案：将 `_build_memory_context()` 移到 `rewrite()` 之前执行，把对话历史传入改写器。
+- 改写器 prompt 增加指令：如果提供了对话历史，请结合上下文消解代词和指代，将隐含信息补充到改写结果中。
+- 调用变化：`rewrite(query, memory_context=memory_context)`（`memory_context` 默认为空字符串，向后兼容）
+- cache_key 已包含 `session_id`，对话上下文变化时 key 自然不同，无需额外处理。
+- 代码：
+  - `src/hz_bank_rag/retrieval/query_rewrite.py`（`rewrite()` 签名扩展）
+  - `src/hz_bank_rag/service/qa_service.py`（`ask()` 和 `ask_stream()` 中调用顺序调整）
+
 ### 4.9 项目如何优化（检索与问答时延）
 
 - 并行召回（BM25 + 向量）
 - `fast_mode` 跳过 Rewrite 与 Rerank
 - SSE 流式输出：`POST /query/stream`
-- Query Cache（TTL + LRU）
+- 三层缓存分治（详见 4.10）
+  - L1 EmbeddingCache：跳过 Embedding API 调用（省 ~200-800ms）
+  - L2 RetrievalCache：语义相似 query 复用检索结果（跳过 embedding + BM25 + vector + rerank）
+  - L3 AnswerCache：精确+语义双模式答案缓存
+- 主动失效：文档变更时按 kb_id 失效 L2/L3 缓存
 - Milvus 维度变化自动切换 collection，降低异常中断
 - 代码：
   - `src/hz_bank_rag/service/qa_service.py`
+  - `src/hz_bank_rag/service/embedding_cache.py`
+  - `src/hz_bank_rag/service/retrieval_cache.py`
   - `src/hz_bank_rag/service/query_cache.py`
+  - `src/hz_bank_rag/retrieval/embedding.py`
   - `src/hz_bank_rag/storage/vector_store.py`
 
-### 4.10 项目如何进行查询缓存
+### 4.10 项目如何进行查询缓存（三层分治架构）
 
-- 类型：进程内内存缓存（`OrderedDict`）
-- 策略：TTL + LRU
-- Key：`kb_id|query|rewritten|top_k|candidate_multiplier|fast_mode|session_id|use_memory`
-- 失效：bad-case 写入后按 `kb_id` 前缀失效
-- 代码：`src/hz_bank_rag/service/query_cache.py`
+```text
+用户提问
+  │
+  ▼
+┌─────────────────────────────────────────────────────┐
+│ L3: AnswerCache（答案缓存）                          │
+│   key = 精确 key + 语义 embedding 双模式              │
+│   命中 → 直接返回答案（跳过一切下游）                 │
+│   TTL: 300s，按 kb_id 主动失效                       │
+└─────────────────────────────────────────────────────┘
+  │ 未命中
+  ▼
+┌─────────────────────────────────────────────────────┐
+│ L2: RetrievalCache（检索结果缓存）                   │
+│   key = 语义 embedding 余弦相似度匹配                │
+│   命中 → 跳过 embedding + BM25 + vector + rerank     │
+│   TTL: 180s，按 kb_id 主动失效                       │
+└─────────────────────────────────────────────────────┘
+  │ 未命中
+  ▼
+┌─────────────────────────────────────────────────────┐
+│ L1: EmbeddingCache（向量缓存）                       │
+│   key = text MD5 hash（精确匹配，文本→向量确定性）    │
+│   命中 → 跳过 embedding API 调用                     │
+│   永不失效（除非 embedding 模型变更）                 │
+└─────────────────────────────────────────────────────┘
+  │ 未命中
+  ▼
+  调用 SiliconFlow Embedding API
+```
+
+**L1 EmbeddingCache**（`src/hz_bank_rag/service/embedding_cache.py`）：
+- 原理：同一段文本用同一模型生成的向量是确定性的，可以永久缓存
+- 实现：`OrderedDict` + LRU 淘汰，线程安全（`threading.Lock`）
+- 接入点：`src/hz_bank_rag/retrieval/embedding.py::encode()`，先查缓存再调 API
+- 配置：`enable_embedding_cache`、`embedding_cache_max_size`
+
+**L2 RetrievalCache**（`src/hz_bank_rag/service/retrieval_cache.py`）：
+- 原理：语义相近的 query（如"数据库连接池超时"和"DB连接池配置问题"）应命中相同检索结果
+- 实现：存储 query embedding + 检索结果，用余弦相似度匹配（阈值 0.92）
+- 接入点：`QAService._retrieve_hits()`，检索前后各查写一次
+- 配置：`enable_retrieval_cache`、`retrieval_cache_ttl_seconds`、`retrieval_cache_max_size`、`retrieval_cache_similarity_threshold`
+
+**L3 AnswerCache**（`src/hz_bank_rag/service/query_cache.py`）：
+- 原理：精确 key 匹配 + 语义相似度匹配双模式
+- 实现：`OrderedDict` 精确层 + 语义条目列表，线程安全，每 50 次访问清理过期条目
+- 配置：`enable_query_cache`、`query_cache_ttl_seconds`、`answer_cache_semantic_threshold`
+
+**主动失效机制**（`src/hz_bank_rag/storage/rag_repository.py`）：
+- `RAGRepository.__init__` 接受 `on_kb_change: Callable[[str], None]` 回调
+- `ingest_document`、`delete_document`、`delete_kb` 执行后触发回调
+- `api/main.py` 注册回调：按 `kb_id` 失效 L2 和 L3 缓存
+
+代码：
+- `src/hz_bank_rag/service/embedding_cache.py`
+- `src/hz_bank_rag/service/retrieval_cache.py`
+- `src/hz_bank_rag/service/query_cache.py`
+- `src/hz_bank_rag/retrieval/embedding.py`
+- `src/hz_bank_rag/storage/rag_repository.py`
+- `src/hz_bank_rag/api/main.py`
 
 ### 4.11 项目如何进行上下文优化（会话记忆）
 

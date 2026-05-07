@@ -30,6 +30,14 @@ class SiliconFlowClient:
         self.api_key = api_key if api_key is not None else settings.siliconflow_api_key
         self.timeout_seconds = timeout_seconds or settings.siliconflow_timeout_seconds
 
+    def health(self) -> dict:
+        """轻量检测：验证 API key 是否已配置。"""
+        return {
+            "status": "ok" if self.api_key else "no_key",
+            "base_url": self.base_url,
+            "key_configured": bool(self.api_key),
+        }
+
     def _headers(self) -> dict[str, str]:
         """构建鉴权请求头。"""
         if not self.api_key:
