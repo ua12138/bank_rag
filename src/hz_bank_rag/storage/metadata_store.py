@@ -113,11 +113,37 @@ class MetadataStore:
                 """
             )
             conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS query_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kb_id TEXT NOT NULL,
+                    session_id TEXT DEFAULT '',
+                    query TEXT NOT NULL,
+                    rewrite_ms INTEGER DEFAULT 0,
+                    retrieval_ms INTEGER DEFAULT 0,
+                    rerank_ms INTEGER DEFAULT 0,
+                    llm_ms INTEGER DEFAULT 0,
+                    total_ms INTEGER DEFAULT 0,
+                    prompt_tokens INTEGER DEFAULT 0,
+                    completion_tokens INTEGER DEFAULT 0,
+                    total_tokens INTEGER DEFAULT 0,
+                    token_source TEXT DEFAULT 'estimate',
+                    stage_detail_json TEXT DEFAULT '{}',
+                    token_detail_json TEXT DEFAULT '{}',
+                    cache_hit INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_conv_session ON conversation_messages(session_id, id)"
             )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_qm_kb_time ON query_metrics(kb_id, created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_qm_session_time ON query_metrics(session_id, created_at)")
             self._ensure_document_columns(conn)
             self._ensure_document_indexes(conn)
             self._ensure_bad_case_columns(conn)
+            self._ensure_query_metric_columns(conn)
 
     @staticmethod
     def _ensure_document_columns(conn: sqlite3.Connection) -> None:
@@ -156,6 +182,18 @@ class MetadataStore:
             "severity": "ALTER TABLE bad_cases ADD COLUMN severity TEXT DEFAULT 'medium'",
             "status": "ALTER TABLE bad_cases ADD COLUMN status TEXT DEFAULT 'open'",
             "expected_answer": "ALTER TABLE bad_cases ADD COLUMN expected_answer TEXT DEFAULT ''",
+        }
+        for col, sql in targets.items():
+            if col not in existing:
+                conn.execute(sql)
+
+    @staticmethod
+    def _ensure_query_metric_columns(conn: sqlite3.Connection) -> None:
+        rows = conn.execute("PRAGMA table_info(query_metrics)").fetchall()
+        existing = {row[1] for row in rows}
+        targets = {
+            "stage_detail_json": "ALTER TABLE query_metrics ADD COLUMN stage_detail_json TEXT DEFAULT '{}'",
+            "token_detail_json": "ALTER TABLE query_metrics ADD COLUMN token_detail_json TEXT DEFAULT '{}'",
         }
         for col, sql in targets.items():
             if col not in existing:
@@ -533,3 +571,156 @@ class MetadataStore:
                 (session_id, kb_id, min_keep_id),
             )
             return int(cur.rowcount or 0)
+
+    def add_query_metric(
+        self,
+        kb_id: str,
+        session_id: str,
+        query: str,
+        rewrite_ms: int,
+        retrieval_ms: int,
+        rerank_ms: int,
+        llm_ms: int,
+        total_ms: int,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        token_source: str,
+        cache_hit: bool,
+        stage_detail: dict | None = None,
+        token_detail: dict | None = None,
+    ) -> None:
+        stage_json = json.dumps(stage_detail or {}, ensure_ascii=False)
+        token_json = json.dumps(token_detail or {}, ensure_ascii=False)
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO query_metrics("
+                "kb_id, session_id, query, rewrite_ms, retrieval_ms, rerank_ms, llm_ms, total_ms, "
+                "prompt_tokens, completion_tokens, total_tokens, token_source, stage_detail_json, token_detail_json, cache_hit"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    kb_id,
+                    session_id or "",
+                    query,
+                    int(rewrite_ms),
+                    int(retrieval_ms),
+                    int(rerank_ms),
+                    int(llm_ms),
+                    int(total_ms),
+                    int(prompt_tokens),
+                    int(completion_tokens),
+                    int(total_tokens),
+                    token_source,
+                    stage_json,
+                    token_json,
+                    1 if cache_hit else 0,
+                ),
+            )
+
+    def list_query_metrics(
+        self,
+        kb_id: str | None = None,
+        session_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(limit, 1000))
+        with self._conn() as conn:
+            if kb_id and session_id:
+                rows = conn.execute(
+                    "SELECT id, kb_id, session_id, query, rewrite_ms, retrieval_ms, rerank_ms, llm_ms, total_ms, "
+                    "prompt_tokens, completion_tokens, total_tokens, token_source, stage_detail_json, token_detail_json, cache_hit, created_at "
+                    "FROM query_metrics WHERE kb_id = ? AND session_id = ? ORDER BY id DESC LIMIT ?",
+                    (kb_id, session_id, safe_limit),
+                ).fetchall()
+            elif kb_id:
+                rows = conn.execute(
+                    "SELECT id, kb_id, session_id, query, rewrite_ms, retrieval_ms, rerank_ms, llm_ms, total_ms, "
+                    "prompt_tokens, completion_tokens, total_tokens, token_source, stage_detail_json, token_detail_json, cache_hit, created_at "
+                    "FROM query_metrics WHERE kb_id = ? ORDER BY id DESC LIMIT ?",
+                    (kb_id, safe_limit),
+                ).fetchall()
+            elif session_id:
+                rows = conn.execute(
+                    "SELECT id, kb_id, session_id, query, rewrite_ms, retrieval_ms, rerank_ms, llm_ms, total_ms, "
+                    "prompt_tokens, completion_tokens, total_tokens, token_source, stage_detail_json, token_detail_json, cache_hit, created_at "
+                    "FROM query_metrics WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                    (session_id, safe_limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id, kb_id, session_id, query, rewrite_ms, retrieval_ms, rerank_ms, llm_ms, total_ms, "
+                    "prompt_tokens, completion_tokens, total_tokens, token_source, stage_detail_json, token_detail_json, cache_hit, created_at "
+                    "FROM query_metrics ORDER BY id DESC LIMIT ?",
+                    (safe_limit,),
+                ).fetchall()
+        return [
+            {
+                "id": r[0],
+                "kb_id": r[1],
+                "session_id": r[2],
+                "query": r[3],
+                "stage_metrics": {
+                    "rewrite_ms": int(r[4] or 0),
+                    "retrieval_ms": int(r[5] or 0),
+                    "rerank_ms": int(r[6] or 0),
+                    "llm_ms": int(r[7] or 0),
+                    "total_ms": int(r[8] or 0),
+                },
+                "token_usage": {
+                    "prompt_tokens": int(r[9] or 0),
+                    "completion_tokens": int(r[10] or 0),
+                    "total_tokens": int(r[11] or 0),
+                    "source": r[12] or "estimate",
+                },
+                "stage_detail": json.loads(r[13] or "{}"),
+                "token_detail": json.loads(r[14] or "{}"),
+                "cache_hit": bool(r[15]),
+                "created_at": r[16],
+            }
+            for r in rows
+        ]
+
+    def metrics_overview(self, kb_id: str | None = None) -> dict[str, Any]:
+        with self._conn() as conn:
+            if kb_id:
+                row = conn.execute(
+                    "SELECT COUNT(*), AVG(total_ms), AVG(rewrite_ms), AVG(retrieval_ms), AVG(rerank_ms), AVG(llm_ms) "
+                    "FROM query_metrics WHERE kb_id = ?",
+                    (kb_id,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT COUNT(*), AVG(total_ms), AVG(rewrite_ms), AVG(retrieval_ms), AVG(rerank_ms), AVG(llm_ms) "
+                    "FROM query_metrics"
+                ).fetchone()
+        return {
+            "kb_id": kb_id or "",
+            "requests": int(row[0] or 0),
+            "avg_ms": {
+                "total_ms": int(row[1] or 0),
+                "rewrite_ms": int(row[2] or 0),
+                "retrieval_ms": int(row[3] or 0),
+                "rerank_ms": int(row[4] or 0),
+                "llm_ms": int(row[5] or 0),
+            },
+        }
+
+    def token_overview(self, kb_id: str | None = None) -> dict[str, Any]:
+        with self._conn() as conn:
+            if kb_id:
+                row = conn.execute(
+                    "SELECT COUNT(*), SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens) "
+                    "FROM query_metrics WHERE kb_id = ?",
+                    (kb_id,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT COUNT(*), SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens) FROM query_metrics"
+                ).fetchone()
+        return {
+            "kb_id": kb_id or "",
+            "requests": int(row[0] or 0),
+            "prompt_tokens": int(row[1] or 0),
+            "completion_tokens": int(row[2] or 0),
+            "total_tokens": int(row[3] or 0),
+        }

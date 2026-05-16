@@ -33,8 +33,11 @@ src/hz_bank_rag/retrieval/hybrid_retriever.py
 src/hz_bank_rag/retrieval/query_rewrite.py
 src/hz_bank_rag/retrieval/reranker.py
 src/hz_bank_rag/service/__init__.py
+src/hz_bank_rag/service/embedding_cache.py
+src/hz_bank_rag/service/kg_service.py
 src/hz_bank_rag/service/qa_service.py
 src/hz_bank_rag/service/query_cache.py
+src/hz_bank_rag/service/retrieval_cache.py
 src/hz_bank_rag/storage/__init__.py
 src/hz_bank_rag/storage/bm25_store.py
 src/hz_bank_rag/storage/metadata_store.py

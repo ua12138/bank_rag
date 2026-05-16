@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.responses import StreamingResponse
 
 from hz_bank_rag.api.schemas import (
@@ -23,6 +24,7 @@ from hz_bank_rag.retrieval.hybrid_retriever import HybridRetriever
 from hz_bank_rag.retrieval.query_rewrite import QueryRewriter
 from hz_bank_rag.retrieval.reranker import SiliconFlowReranker
 from hz_bank_rag.service.qa_service import QAService
+from hz_bank_rag.service.kg_service import KnowledgeGraphService
 from hz_bank_rag.storage.bm25_store import BM25Store
 from hz_bank_rag.storage.metadata_store import MetadataStore
 from hz_bank_rag.storage.rag_repository import DuplicateDocumentError, RAGRepository
@@ -66,6 +68,7 @@ def build_app() -> FastAPI:
         meta=meta,
     )
     ragas_runner = RagasRunner()
+    kg_service = KnowledgeGraphService()
 
     # 缓存失效回调：文档入库/删除时，按 kb_id 失效 L2 检索缓存和 L3 答案缓存。
     def _invalidate_caches(changed_kb_id: str) -> None:
@@ -166,6 +169,8 @@ def build_app() -> FastAPI:
                 retrieval_scope=req.retrieval_scope,
                 freshness_weight=req.freshness_weight,
                 dedup_by_family=req.dedup_by_family,
+                enable_kg=req.enable_kg,
+                kg_hop_limit=req.kg_hop_limit,
             )
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -347,6 +352,75 @@ def build_app() -> FastAPI:
             return seed_demo_data(repo=repo, kb_id=settings.default_kb_id, data_dir=Path(settings.data_dir))
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/kg/rebuild")
+    def kg_rebuild(
+        kb_id: str = Query(..., description="Knowledge base id"),
+        retrieval_scope: str = Query(default="active_only", description="active_only|include_history"),
+    ) -> dict:
+        chunks = repo.get_kb_chunk_map(kb_id=kb_id, retrieval_scope=retrieval_scope)
+        return kg_service.rebuild(kb_id=kb_id, chunks=list(chunks.values()))
+
+    @app.get("/kg/entities/search")
+    def kg_entities_search(
+        kb_id: str = Query(...),
+        keyword: str = Query(...),
+        limit: int = Query(default=20, ge=1, le=200),
+    ) -> dict:
+        return {"kb_id": kb_id, "entities": kg_service.entities_search(kb_id=kb_id, keyword=keyword, limit=limit)}
+
+    @app.get("/kg/subgraph")
+    def kg_subgraph(
+        kb_id: str = Query(...),
+        entity: str = Query(...),
+        hop: int = Query(default=2, ge=1, le=4),
+    ) -> dict:
+        data = kg_service.subgraph(kb_id=kb_id, entity=entity, hop=hop)
+        return {"kb_id": kb_id, "entity": entity, "hop": hop, **data}
+
+    @app.get("/kg/path")
+    def kg_path(
+        kb_id: str = Query(...),
+        source: str = Query(...),
+        target: str = Query(...),
+    ) -> dict:
+        data = kg_service.shortest_path(kb_id=kb_id, source=source, target=target)
+        return {"kb_id": kb_id, "source": source, "target": target, **data}
+
+    @app.get("/metrics/overview")
+    def metrics_overview(kb_id: str | None = Query(default=None)) -> dict:
+        return meta.metrics_overview(kb_id=kb_id)
+
+    @app.get("/metrics/tokens")
+    def metrics_tokens(kb_id: str | None = Query(default=None)) -> dict:
+        return meta.token_overview(kb_id=kb_id)
+
+    @app.get("/metrics/latency/stages")
+    def metrics_latency_stages(kb_id: str | None = Query(default=None)) -> dict:
+        return meta.metrics_overview(kb_id=kb_id)
+
+    @app.get("/metrics/requests")
+    def metrics_requests(
+        kb_id: str | None = Query(default=None),
+        session_id: str | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=1000),
+    ) -> dict:
+        rows = meta.list_query_metrics(kb_id=kb_id, session_id=session_id, limit=limit)
+        return {"count": len(rows), "rows": rows}
+
+    @app.get("/ui/kg", response_class=HTMLResponse)
+    def ui_kg() -> str:
+        return """
+<!doctype html><html><head><meta charset='utf-8'><title>KG Console</title></head>
+<body><h1>KG Console</h1><p>Use APIs: /kg/rebuild, /kg/entities/search, /kg/subgraph, /kg/path</p></body></html>
+"""
+
+    @app.get("/ui/metrics", response_class=HTMLResponse)
+    def ui_metrics() -> str:
+        return """
+<!doctype html><html><head><meta charset='utf-8'><title>Metrics Console</title></head>
+<body><h1>Metrics Console</h1><p>Use APIs: /metrics/overview, /metrics/tokens, /metrics/latency/stages, /metrics/requests</p></body></html>
+"""
 
     @app.get("/collections/policy")
     def get_collection_policy() -> dict:

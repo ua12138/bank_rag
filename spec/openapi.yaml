@@ -307,6 +307,111 @@ paths:
       responses:
         '200': { description: OK }
 
+  /kg/rebuild:
+    post:
+      tags: [knowledge-base]
+      summary: Rebuild knowledge graph from documents (implemented-basic)
+      responses:
+        '200': { description: OK }
+
+  /kg/entities/search:
+    get:
+      tags: [query]
+      summary: Search entities in knowledge graph (implemented-basic)
+      parameters:
+        - in: query
+          name: kb_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: keyword
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+
+  /kg/subgraph:
+    get:
+      tags: [query]
+      summary: Get subgraph by seed entity (implemented-basic)
+      parameters:
+        - in: query
+          name: kb_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: entity
+          required: true
+          schema: { type: string }
+        - in: query
+          name: hop
+          required: false
+          schema: { type: integer, default: 2, minimum: 1, maximum: 4 }
+      responses:
+        '200': { description: OK }
+
+  /kg/path:
+    get:
+      tags: [query]
+      summary: Find relation path between entities (implemented-basic)
+      parameters:
+        - in: query
+          name: kb_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: source
+          required: true
+          schema: { type: string }
+        - in: query
+          name: target
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+
+  /metrics/overview:
+    get:
+      tags: [system]
+      summary: Query metrics overview (implemented-basic)
+      responses:
+        '200': { description: OK }
+
+  /metrics/tokens:
+    get:
+      tags: [system]
+      summary: Query token metrics (implemented-basic)
+      responses:
+        '200': { description: OK }
+
+  /metrics/latency/stages:
+    get:
+      tags: [system]
+      summary: Query stage latency metrics (implemented-basic)
+      responses:
+        '200': { description: OK }
+
+  /metrics/requests:
+    get:
+      tags: [system]
+      summary: Query request metric records (implemented-basic)
+      responses:
+        '200': { description: OK }
+
+  /ui/kg:
+    get:
+      tags: [system]
+      summary: KG dashboard page (implemented-basic)
+      responses:
+        '200': { description: OK }
+
+  /ui/metrics:
+    get:
+      tags: [system]
+      summary: Metrics dashboard page (implemented-basic)
+      responses:
+        '200': { description: OK }
+
   /demo/seed:
     post:
       tags: [demo]
@@ -353,6 +458,8 @@ components:
         retrieval_scope: { $ref: '#/components/schemas/RetrievalScope' }
         freshness_weight: { type: number, format: float, default: 0.08 }
         dedup_by_family: { type: boolean, default: true }
+        enable_kg: { type: boolean, default: false, description: enable KG enhancement }
+        kg_hop_limit: { type: integer, default: 2, minimum: 1, maximum: 4, description: KG expansion depth }
 
     BadCaseRequest:
       type: object
@@ -482,6 +589,29 @@ components:
           items: { $ref: '#/components/schemas/Citation' }
         cache_hit: { type: boolean }
         latency_ms: { type: integer }
+        stage_metrics:
+          type: object
+          description: Planned per-stage latency metrics
+          properties:
+            rewrite_ms: { type: integer }
+            retrieval_ms: { type: integer }
+            rerank_ms: { type: integer }
+            llm_ms: { type: integer }
+            total_ms: { type: integer }
+        token_usage:
+          type: object
+          description: Planned token usage metrics
+          properties:
+            prompt_tokens: { type: integer }
+            completion_tokens: { type: integer }
+            total_tokens: { type: integer }
+            source: { type: string, description: usage_api_or_estimate }
+        kg_citations:
+          type: array
+          description: Planned KG evidence records
+          items:
+            type: object
+            additionalProperties: true
         cache_stats:
           type: object
           additionalProperties: true

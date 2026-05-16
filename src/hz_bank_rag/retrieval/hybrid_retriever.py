@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import math
+import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
@@ -24,8 +25,26 @@ class HybridRetriever:
         top_k: int = 5,
         candidate_multiplier: int = 4,
     ) -> list[RetrievalHit]:
+        hits, _ = self.search_with_trace(
+            kb_id=kb_id,
+            query=query,
+            kb_chunk_map=kb_chunk_map,
+            top_k=top_k,
+            candidate_multiplier=candidate_multiplier,
+        )
+        return hits
+
+    def search_with_trace(
+        self,
+        kb_id: str,
+        query: str,
+        kb_chunk_map: dict[str, dict],
+        top_k: int = 5,
+        candidate_multiplier: int = 4,
+    ) -> tuple[list[RetrievalHit], dict[str, int]]:
         # candidate_k 通常 > top_k：
         # 先“宽召回”更多候选，再在后续阶段（重排/去重）收缩到 top_k。
+        t0 = time.perf_counter()
         candidate_k = max(top_k * candidate_multiplier, top_k)
 
         use_milvus_sparse = bool(
@@ -40,7 +59,9 @@ class HybridRetriever:
                 sparse_future = pool.submit(self.bm25_store.search, kb_id=kb_id, query=query, top_k=candidate_k)
             dense_future = pool.submit(self.vector_store.search, query=query, kb_id=kb_id, top_k=candidate_k)
             sparse_hits = sparse_future.result()
+            t_sparse = time.perf_counter()
             dense_hits = dense_future.result()
+            t_dense = time.perf_counter()
 
         sparse_norm = self._normalize_scores(sparse_hits)
         dense_norm = self._normalize_scores(dense_hits)
@@ -82,7 +103,12 @@ class HybridRetriever:
             )
 
         merged.sort(key=lambda hit: hit.score, reverse=True)
-        return merged[:candidate_k]
+        t1 = time.perf_counter()
+        trace = {
+            "bm25_vector_recall_ms": int((max(t_sparse, t_dense) - t0) * 1000),
+            "rrf_fusion_ms": int((t1 - max(t_sparse, t_dense)) * 1000),
+        }
+        return merged[:candidate_k], trace
 
     @staticmethod
     def _rrf(rank: int | None, k: int = 60) -> float:

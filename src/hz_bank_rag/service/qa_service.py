@@ -64,6 +64,8 @@ class QAService:
         retrieval_scope: str = "active_only",
         freshness_weight: float | None = None,
         dedup_by_family: bool | None = None,
+        enable_kg: bool = False,
+        kg_hop_limit: int = 2,
     ) -> dict:
         # 主流程（同步版）：
         # 1) 查询改写 2) 命中缓存则直接返回
@@ -71,8 +73,11 @@ class QAService:
         # 5) 保存会话记忆 6) 写入缓存
         start = time.perf_counter()
         # 先构建对话记忆，再改写（改写时可结合上下文消解代词）
+        t0 = time.perf_counter()
         memory_context, memory_meta = self._build_memory_context(kb_id=kb_id, session_id=session_id, use_memory=use_memory)
+        t1 = time.perf_counter()
         rewritten = query if fast_mode else self.rewriter.rewrite(query, memory_context=memory_context)
+        t2 = time.perf_counter()
         final_scope = retrieval_scope or settings.default_retrieval_scope
         final_freshness = settings.default_freshness_weight if freshness_weight is None else float(freshness_weight)
         final_dedup = settings.default_dedup_by_family if dedup_by_family is None else bool(dedup_by_family)
@@ -105,9 +110,23 @@ class QAService:
                 result["cache_hit"] = True
                 result["latency_ms"] = int((time.perf_counter() - start) * 1000)
                 result["cache_stats"] = self.cache.stats()
+                self._record_metrics(
+                    kb_id=kb_id,
+                    session_id=session_id,
+                    query=query,
+                    rewrite_ms=int((t2 - t1) * 1000),
+                    retrieval_ms=0,
+                    rerank_ms=0,
+                    llm_ms=0,
+                    total_ms=result["latency_ms"],
+                    answer=result.get("answer", ""),
+                    cache_hit=True,
+                )
                 return result
 
+        t3 = time.perf_counter()
         chunk_map = self.repo.get_kb_chunk_map(kb_id=kb_id, retrieval_scope=final_scope)
+        t4 = time.perf_counter()
         if not chunk_map:
             # 新手常见问题：知识库为空时不是报错，而是返回可读提示。
             return {
@@ -120,7 +139,7 @@ class QAService:
                 "latency_ms": int((time.perf_counter() - start) * 1000),
             }
 
-        hits = self._retrieve_hits(
+        hits, retrieval_trace = self._retrieve_hits(
             kb_id=kb_id,
             query=query,
             rewritten=rewritten,
@@ -132,11 +151,49 @@ class QAService:
             freshness_weight=final_freshness,
             dedup_by_family=final_dedup,
         )
+        t5 = time.perf_counter()
 
-        answer = self._generate_answer(query=query, rewritten=rewritten, hits=hits, memory_context=memory_context)
+        answer, llm_trace = self._generate_answer_with_metrics(
+            query=query, rewritten=rewritten, hits=hits, memory_context=memory_context
+        )
+        t6 = time.perf_counter()
+
+        kg_citations: list[dict] = []
+        if enable_kg:
+            seen = set()
+            for hit in hits[: max(1, top_k)]:
+                for token in re.findall(r"[\u4e00-\u9fff]{2,8}|[A-Za-z][A-Za-z0-9_\-]{2,}", hit.text):
+                    if token in seen:
+                        continue
+                    seen.add(token)
+                    kg_citations.append({"entity": token, "source_chunk_id": hit.chunk_id})
+                    if len(kg_citations) >= max(5, min(30, kg_hop_limit * 10)):
+                        break
+                if len(kg_citations) >= max(5, min(30, kg_hop_limit * 10)):
+                    break
 
         if session_id and use_memory:
             self._save_conversation_turn(session_id=session_id, kb_id=kb_id, query=query, answer=answer)
+
+        total_ms = int((time.perf_counter() - start) * 1000)
+        stage_metrics = {
+            "rewrite_ms": int((t2 - t1) * 1000),
+            "bm25_vector_recall_ms": int(retrieval_trace.get("bm25_vector_recall_ms", 0)),
+            "rrf_fusion_ms": int(retrieval_trace.get("rrf_fusion_ms", 0)),
+            "retrieval_ms": int(retrieval_trace.get("bm25_vector_recall_ms", 0))
+            + int(retrieval_trace.get("rrf_fusion_ms", 0)),
+            "rerank_ms": int(retrieval_trace.get("rerank_ms", 0)),
+            "prompt_assemble_ms": int(llm_trace.get("prompt_assemble_ms", 0)),
+            "llm_generation_ms": int(llm_trace.get("llm_generation_ms", 0)),
+            "llm_ms": int((t6 - t5) * 1000),
+            "total_ms": total_ms,
+        }
+        token_usage = llm_trace.get("token_usage", self._estimate_token_usage(query=query, answer=answer))
+        token_usage["rewrite_tokens"] = 0 if fast_mode else self._estimate_tokens_for_text(query + "\n" + rewritten)
+        token_usage["rerank_tokens"] = self._estimate_tokens_for_text(rewritten + "\n" + "\n".join([h.text[:200] for h in hits[:top_k]]))
+        token_usage["prompt_assemble_tokens"] = self._estimate_tokens_for_text(
+            llm_trace.get("prompt_text", "")
+        )
 
         result = {
             "kb_id": kb_id,
@@ -150,13 +207,31 @@ class QAService:
             "session_id": session_id,
             "memory": memory_meta,
             "citations": [self._citation_from_hit(hit) for hit in hits],
+            "kg_citations": kg_citations,
+            "stage_metrics": stage_metrics,
+            "token_usage": token_usage,
             "cache_hit": False,
-            "latency_ms": int((time.perf_counter() - start) * 1000),
+            "latency_ms": total_ms,
         }
 
         if self.cache is not None:
             self.cache.set(cache_key, copy.deepcopy(result), query_embedding=query_embedding, kb_id=kb_id)
             result["cache_stats"] = self.cache.stats()
+
+        self._record_metrics(
+            kb_id=kb_id,
+            session_id=session_id,
+            query=query,
+            rewrite_ms=stage_metrics["rewrite_ms"],
+            retrieval_ms=stage_metrics["retrieval_ms"],
+            rerank_ms=stage_metrics["rerank_ms"],
+            llm_ms=stage_metrics["llm_ms"],
+            total_ms=stage_metrics["total_ms"],
+            answer=answer,
+            cache_hit=False,
+            stage_metrics=stage_metrics,
+            token_usage=token_usage,
+        )
         return result
 
     def ask_stream(
@@ -197,7 +272,7 @@ class QAService:
 
             return meta, empty_stream()
 
-        hits = self._retrieve_hits(
+        hits, _ = self._retrieve_hits(
             kb_id=kb_id,
             query=query,
             rewritten=rewritten,
@@ -251,7 +326,7 @@ class QAService:
         chunk_map = self.repo.get_kb_chunk_map(kb_id=kb_id, retrieval_scope=final_scope)
         hits = []
         if chunk_map:
-            hits = self._retrieve_hits(
+            hits, _ = self._retrieve_hits(
                 kb_id=kb_id,
                 query=query,
                 rewritten=rewritten,
@@ -298,7 +373,8 @@ class QAService:
         retrieval_scope: str,
         freshness_weight: float,
         dedup_by_family: bool,
-    ):
+    ) -> tuple[list, dict]:
+        retrieval_trace = {"bm25_vector_recall_ms": 0, "rrf_fusion_ms": 0, "rerank_ms": 0}
         # L2 语义缓存：语义相近的 query 直接复用检索结果
         if self.retrieval_cache is not None:
             query_vec = self.embedder.encode([rewritten])
@@ -308,7 +384,7 @@ class QAService:
                 )
                 cached_hits = self.retrieval_cache.get(query_vec[0], kb_id, params_hash)
                 if cached_hits is not None:
-                    return cached_hits
+                    return cached_hits, retrieval_trace
         else:
             query_vec = None
             params_hash = None
@@ -317,16 +393,19 @@ class QAService:
         # 关键词过滤（可选） -> 混合检索 -> 轻关键词加分 -> 重排 -> 新鲜度+去重
         active_chunk_map, keyword_meta = self._apply_keyword_layer(query=rewritten, chunk_map=chunk_map)
         effective_multiplier = 2 if fast_mode else candidate_multiplier
-        hits = self.retriever.search(
+        hits, retriever_trace = self.retriever.search_with_trace(
             kb_id=kb_id,
             query=rewritten,
             kb_chunk_map=active_chunk_map,
             top_k=top_k,
             candidate_multiplier=effective_multiplier,
         )
+        retrieval_trace.update(retriever_trace)
         hits = self._apply_weak_keyword_boost(hits=hits, keywords=keyword_meta.get("weak", []))
         if not fast_mode:
+            tr0 = time.perf_counter()
             hits = self.reranker.rerank(rewritten, hits, top_k=top_k)
+            retrieval_trace["rerank_ms"] = int((time.perf_counter() - tr0) * 1000)
         else:
             hits = hits[:top_k]
         hits = self._apply_freshness_and_dedup(
@@ -341,7 +420,7 @@ class QAService:
         if self.retrieval_cache is not None and query_vec is not None and query_vec.size > 0:
             self.retrieval_cache.set(query_vec[0], kb_id, params_hash, hits)
 
-        return hits
+        return hits, retrieval_trace
 
     @staticmethod
     def _citation_from_hit(hit) -> dict:
@@ -537,6 +616,36 @@ class QAService:
             preview = "\n".join([f"[{idx + 1}] {hit.text[:220]}" for idx, hit in enumerate(hits)])
             return "Model call failed. Retrieved snippets:\n" + preview
 
+    def _generate_answer_with_metrics(self, query: str, rewritten: str, hits: list, memory_context: str = "") -> tuple[str, dict]:
+        p0 = time.perf_counter()
+        messages = self._build_messages(query=query, rewritten=rewritten, hits=hits, memory_context=memory_context)
+        p1 = time.perf_counter()
+        try:
+            g0 = time.perf_counter()
+            answer = self.llm_client.chat(messages=messages, model=settings.siliconflow_chat_model)
+            g1 = time.perf_counter()
+        except SiliconFlowError:
+            preview = "\n".join([f"[{idx + 1}] {hit.text[:220]}" for idx, hit in enumerate(hits)])
+            answer = "Model call failed. Retrieved snippets:\n" + preview
+            g1 = time.perf_counter()
+            g0 = p1
+        prompt_text = "\n".join([str(m.get("content", "")) for m in messages])
+        prompt_tokens = self._estimate_tokens_for_text(prompt_text)
+        completion_tokens = self._estimate_tokens_for_text(answer)
+        token_usage = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "source": "estimate",
+        }
+        trace = {
+            "prompt_assemble_ms": int((p1 - p0) * 1000),
+            "llm_generation_ms": int((g1 - g0) * 1000),
+            "prompt_text": prompt_text,
+            "token_usage": token_usage,
+        }
+        return answer, trace
+
     def _generate_answer_stream(self, query: str, rewritten: str, hits: list, memory_context: str = "") -> Iterator[str]:
         messages = self._build_messages(query=query, rewritten=rewritten, hits=hits, memory_context=memory_context)
         try:
@@ -645,6 +754,55 @@ class QAService:
                 f"{freshness_weight:.4f}",
                 str(int(dedup_by_family)),
             ]
+        )
+
+    @staticmethod
+    def _estimate_token_usage(query: str, answer: str) -> dict:
+        prompt_tokens = max(1, len(query or "") // 4)
+        completion_tokens = max(1, len(answer or "") // 4)
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "source": "estimate",
+        }
+
+    @staticmethod
+    def _estimate_tokens_for_text(text: str) -> int:
+        return max(1, len(text or "") // 4)
+
+    def _record_metrics(
+        self,
+        kb_id: str,
+        session_id: str,
+        query: str,
+        rewrite_ms: int,
+        retrieval_ms: int,
+        rerank_ms: int,
+        llm_ms: int,
+        total_ms: int,
+        answer: str,
+        cache_hit: bool,
+        stage_metrics: dict | None = None,
+        token_usage: dict | None = None,
+    ) -> None:
+        tokens = token_usage or self._estimate_token_usage(query=query, answer=answer)
+        self.meta.add_query_metric(
+            kb_id=kb_id,
+            session_id=session_id,
+            query=query,
+            rewrite_ms=rewrite_ms,
+            retrieval_ms=retrieval_ms,
+            rerank_ms=rerank_ms,
+            llm_ms=llm_ms,
+            total_ms=total_ms,
+            prompt_tokens=tokens["prompt_tokens"],
+            completion_tokens=tokens["completion_tokens"],
+            total_tokens=tokens["total_tokens"],
+            token_source=tokens["source"],
+            cache_hit=cache_hit,
+            stage_detail=stage_metrics or {},
+            token_detail=tokens,
         )
 
     def record_bad_case(

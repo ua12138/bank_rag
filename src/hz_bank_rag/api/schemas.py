@@ -34,6 +34,8 @@ class QueryRequest(BaseModel):
     retrieval_scope: str = "active_only"
     freshness_weight: float = 0.08
     dedup_by_family: bool = True
+    enable_kg: bool = False
+    kg_hop_limit: int = 2
 
 
 class BadCaseRequest(BaseModel):
