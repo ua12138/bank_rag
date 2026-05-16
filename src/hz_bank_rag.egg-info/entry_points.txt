@@ -1,4 +1,0 @@
-[console_scripts]
-hz-rag-mcp = hz_bank_rag.mcp.main:run
-hz-rag-plus = RAG_PLUS.main:run
-hz-rag-seed = hz_bank_rag.examples.seed_demo:main

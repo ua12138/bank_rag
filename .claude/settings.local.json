@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "Bash(python -c \"import ast; ast.parse\\(open\\('src/hz_bank_rag/api/main.py', encoding='utf-8'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(rm -rf d:/CodeWarehouse/CodexLearn/bank_rag/src/hz_bank_rag.egg-info && echo \"Done deleting egg-info\")",
+      "Bash(python -c \"import hz_bank_rag; print\\('import OK, path:', hz_bank_rag.__file__\\)\")",
+      "Bash(python -m pytest tests/ -x -q)"
+    ],
+    "additionalDirectories": [
+      "d:\\CodeWarehouse\\CodexLearn\\bank_rag\\src\\hz_bank_rag.egg-info"
     ]
   }
 }
